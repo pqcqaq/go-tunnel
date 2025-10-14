@@ -12,7 +12,7 @@ import (
 
 // TunnelServer 隧道服务器接口
 type TunnelServer interface {
-	ForwardConnection(clientConn net.Conn, targetPort int) error
+	ForwardConnection(clientConn net.Conn, targetIP string, targetPort int) error
 	IsConnected() bool
 }
 
@@ -20,6 +20,7 @@ type TunnelServer interface {
 type Forwarder struct {
 	sourcePort   int
 	targetPort   int
+	targetIP     string
 	targetAddr   string
 	listener     net.Listener
 	cancel       context.CancelFunc
@@ -35,6 +36,7 @@ func NewForwarder(sourcePort int, targetIP string, targetPort int) *Forwarder {
 	return &Forwarder{
 		sourcePort: sourcePort,
 		targetPort: targetPort,
+		targetIP:   targetIP,
 		targetAddr: fmt.Sprintf("%s:%d", targetIP, targetPort),
 		cancel:     cancel,
 		ctx:        ctx,
@@ -43,11 +45,12 @@ func NewForwarder(sourcePort int, targetIP string, targetPort int) *Forwarder {
 }
 
 // NewTunnelForwarder 创建使用隧道的端口转发器
-func NewTunnelForwarder(sourcePort int, targetPort int, tunnelServer TunnelServer) *Forwarder {
+func NewTunnelForwarder(sourcePort int, targetIP string, targetPort int, tunnelServer TunnelServer) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
 		sourcePort:   sourcePort,
 		targetPort:   targetPort,
+		targetIP:     targetIP,
 		tunnelServer: tunnelServer,
 		useTunnel:    true,
 		cancel:       cancel,
@@ -117,8 +120,8 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 		}
 
 		// 将连接转发到隧道，ForwardConnection 会处理连接关闭
-		if err := f.tunnelServer.ForwardConnection(clientConn, f.targetPort); err != nil {
-			log.Printf("隧道转发失败 (端口 %d -> %d): %v", f.sourcePort, f.targetPort, err)
+		if err := f.tunnelServer.ForwardConnection(clientConn, f.targetIP, f.targetPort); err != nil {
+			log.Printf("隧道转发失败 (端口 %d -> %s:%d): %v", f.sourcePort, f.targetIP, f.targetPort, err)
 		}
 		return
 	}
@@ -221,7 +224,7 @@ func (m *Manager) Add(sourcePort int, targetIP string, targetPort int) error {
 }
 
 // AddTunnel 添加使用隧道的转发器
-func (m *Manager) AddTunnel(sourcePort int, targetPort int, tunnelServer TunnelServer) error {
+func (m *Manager) AddTunnel(sourcePort int, targetIP string, targetPort int, tunnelServer TunnelServer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -229,7 +232,7 @@ func (m *Manager) AddTunnel(sourcePort int, targetPort int, tunnelServer TunnelS
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewTunnelForwarder(sourcePort, targetPort, tunnelServer)
+	forwarder := NewTunnelForwarder(sourcePort, targetIP, targetPort, tunnelServer)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}

@@ -278,21 +278,30 @@ func (c *Client) handleTunnelMessage(msg *TunnelMessage) {
 
 // handleConnectRequest 处理连接请求
 func (c *Client) handleConnectRequest(msg *TunnelMessage) {
-	if len(msg.Data) < 6 {
+	// 解析: connID(4) + targetPort(2) + targetIPLen(1) + targetIP(变长)
+	if len(msg.Data) < 7 {
 		log.Printf("连接请求数据太短")
 		return
 	}
 
 	connID := binary.BigEndian.Uint32(msg.Data[0:4])
 	targetPort := binary.BigEndian.Uint16(msg.Data[4:6])
-	targetAddr := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	targetIPLen := int(msg.Data[6])
+	
+	if len(msg.Data) < 7+targetIPLen {
+		log.Printf("连接请求数据不完整")
+		return
+	}
+	
+	targetIP := string(msg.Data[7 : 7+targetIPLen])
+	targetAddr := net.JoinHostPort(targetIP, fmt.Sprintf("%d", targetPort))
 
-	log.Printf("收到连接请求: ID=%d, 端口=%d", connID, targetPort)
+	log.Printf("收到连接请求: ID=%d, 地址=%s", connID, targetAddr)
 
-	// 尝试连接到本地服务
+	// 尝试连接到目标服务
 	localConn, err := net.DialTimeout("tcp", targetAddr, ConnectTimeout)
 	if err != nil {
-		log.Printf("连接本地服务失败 (ID=%d -> %s): %v", connID, targetAddr, err)
+		log.Printf("连接目标服务失败 (ID=%d -> %s): %v", connID, targetAddr, err)
 		c.sendConnectResponse(connID, ConnStatusFailed)
 		return
 	}
@@ -309,7 +318,7 @@ func (c *Client) handleConnectRequest(msg *TunnelMessage) {
 	c.connections[connID] = connection
 	c.connMu.Unlock()
 
-	log.Printf("建立本地连接: ID=%d -> %s", connID, targetAddr)
+	log.Printf("建立目标连接: ID=%d -> %s", connID, targetAddr)
 
 	// 发送连接成功响应
 	c.sendConnectResponse(connID, ConnStatusSuccess)
@@ -337,9 +346,8 @@ func (c *Client) handleDataMessage(msg *TunnelMessage) {
 		return
 	}
 
-	// 写入到本地连接
-	if _, err := connection.Conn.Write(data); err != nil {
-		log.Printf("写入本地连接失败 (ID=%d): %v", connID, err)
+		if _, err := connection.Conn.Write(data); err != nil {
+		log.Printf("写入目标连接失败 (ID=%d): %v", connID, err)
 		c.closeConnection(connID)
 	}
 }
@@ -410,7 +418,7 @@ func (c *Client) forwardData(connection *LocalConnection) {
 		n, err := connection.Conn.Read(buffer)
 		if err != nil {
 			if err != io.EOF && !isTimeout(err) {
-				log.Printf("读取本地连接失败 (ID=%d): %v", connection.ID, err)
+				log.Printf("读取目标连接失败 (ID=%d): %v", connection.ID, err)
 			}
 			return
 		}

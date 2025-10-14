@@ -73,7 +73,7 @@ func main() {
 				log.Printf("警告: 端口 %d 需要隧道模式但隧道服务未启用，跳过", mapping.SourcePort)
 				continue
 			}
-			err = fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetPort, tunnelServer)
+			err = fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort, tunnelServer)
 		} else {
 			// 直接模式
 			err = fwdManager.Add(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort)

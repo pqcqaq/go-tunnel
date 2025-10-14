@@ -34,7 +34,7 @@ type mockTunnelServer struct {
 	connected bool
 }
 
-func (m *mockTunnelServer) ForwardConnection(clientConn net.Conn, targetPort int) error {
+func (m *mockTunnelServer) ForwardConnection(clientConn net.Conn, targetIp string, targetPort int) error {
 	// 简单的模拟实现
 	defer clientConn.Close()
 	return nil
@@ -49,7 +49,7 @@ func TestNewTunnelForwarder(t *testing.T) {
 	// 创建模拟隧道服务器
 	mockServer := &mockTunnelServer{connected: true}
 	
-	fwd := NewTunnelForwarder(8080, 80, mockServer)
+	fwd := NewTunnelForwarder(8080, "127.0.0.1", 80, mockServer)
 	
 	if fwd == nil {
 		t.Fatal("创建隧道转发器失败")

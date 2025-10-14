@@ -97,8 +97,15 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusServiceUnavailable, "隧道未连接")
 			return
 		}
-		// 隧道模式使用本地地址
-		req.TargetIP = "127.0.0.1"
+		// 隧道模式也需要目标IP（客户端会连接到该IP）
+		if req.TargetIP == "" {
+			h.writeError(w, http.StatusBadRequest, "target_ip 不能为空")
+			return
+		}
+		if net.ParseIP(req.TargetIP) == nil {
+			h.writeError(w, http.StatusBadRequest, "target_ip 格式无效")
+			return
+		}
 	} else {
 		// 直接模式需要验证 IP
 		if req.TargetIP == "" {
@@ -121,7 +128,7 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if req.UseTunnel {
 		// 隧道模式：使用隧道转发
-		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.SourcePort, h.tunnelServer)
+		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetIP, req.TargetPort, h.tunnelServer)
 	} else {
 		// 直接模式：直接TCP转发
 		err = h.forwarderMgr.Add(req.SourcePort, req.TargetIP, req.TargetPort)

@@ -456,7 +456,7 @@ func TestForwardConnection(t *testing.T) {
 	
 	// 启动连接转发
 	go func() {
-		err := server.ForwardConnection(serverSideConn, targetPort)
+		err := server.ForwardConnection(serverSideConn, "127.0.0.1", targetPort)
 		if err != nil {
 			t.Errorf("转发连接失败: %v", err)
 		}
