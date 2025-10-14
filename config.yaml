@@ -1,0 +1,19 @@
+# 端口转发服务配置文件
+
+# 端口范围配置
+port_range:
+  from: 30000
+  end: 40000
+
+# 内网穿透配置
+tunnel:
+  enabled: true
+  listen_port: 9000
+
+# HTTP API 配置
+api:
+  listen_port: 8080
+  
+# 数据库配置
+database:
+  path: "./data/mappings.db"
