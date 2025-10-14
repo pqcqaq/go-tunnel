@@ -177,10 +177,11 @@ func (s *Server) acceptLoop() {
 
 		log.Printf("隧道客户端已连接: %s", conn.RemoteAddr())
 
-		s.wg.Add(3)
+		s.wg.Add(2)
 		go s.handleTunnelRead(conn)
 		go s.handleTunnelWrite(conn)
-		go s.keepAliveLoop(conn)
+		// 注释掉服务器端主动心跳，只由客户端发送心跳
+		// go s.keepAliveLoop(conn)
 	}
 }
 
@@ -429,6 +430,7 @@ func (s *Server) handleKeepAlive(msg *TunnelMessage) {
 
 	select {
 	case s.sendChan <- response:
+		// log.Printf("回应心跳消息") // 降低日志频率
 	default:
 		log.Printf("发送心跳响应失败: 发送队列已满")
 	}
