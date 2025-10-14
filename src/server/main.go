@@ -64,7 +64,7 @@ func main() {
 			continue
 		}
 
-		log.Printf("恢复端口映射: %d -> %s:%d (tunnel: %v)", mapping.SourcePort, mapping.TargetIP, mapping.TargetPort, mapping.UseTunnel)
+		log.Printf("恢复端口映射: %d -> %s:%d (tunnel: %v)", mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.UseTunnel)
 		
 		var err error
 		if mapping.UseTunnel {
@@ -73,10 +73,10 @@ func main() {
 				log.Printf("警告: 端口 %d 需要隧道模式但隧道服务未启用，跳过", mapping.SourcePort)
 				continue
 			}
-			err = fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort, tunnelServer)
+			err = fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, tunnelServer)
 		} else {
 			// 直接模式
-			err = fwdManager.Add(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort)
+			err = fwdManager.Add(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort)
 		}
 		
 		if err != nil {

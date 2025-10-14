@@ -20,8 +20,7 @@ type TunnelServer interface {
 type Forwarder struct {
 	sourcePort   int
 	targetPort   int
-	targetIP     string
-	targetAddr   string
+	targetHost   string // 支持IP或域名
 	listener     net.Listener
 	cancel       context.CancelFunc
 	ctx          context.Context
@@ -31,13 +30,12 @@ type Forwarder struct {
 }
 
 // NewForwarder 创建新的端口转发器
-func NewForwarder(sourcePort int, targetIP string, targetPort int) *Forwarder {
+func NewForwarder(sourcePort int, targetHost string, targetPort int) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
 		sourcePort: sourcePort,
 		targetPort: targetPort,
-		targetIP:   targetIP,
-		targetAddr: fmt.Sprintf("%s:%d", targetIP, targetPort),
+		targetHost: targetHost,
 		cancel:     cancel,
 		ctx:        ctx,
 		useTunnel:  false,
@@ -45,12 +43,12 @@ func NewForwarder(sourcePort int, targetIP string, targetPort int) *Forwarder {
 }
 
 // NewTunnelForwarder 创建使用隧道的端口转发器
-func NewTunnelForwarder(sourcePort int, targetIP string, targetPort int, tunnelServer TunnelServer) *Forwarder {
+func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
 		sourcePort:   sourcePort,
 		targetPort:   targetPort,
-		targetIP:     targetIP,
+		targetHost:   targetHost,
 		tunnelServer: tunnelServer,
 		useTunnel:    true,
 		cancel:       cancel,
@@ -66,7 +64,7 @@ func (f *Forwarder) Start() error {
 	}
 
 	f.listener = listener
-	log.Printf("端口转发启动: %d -> %s (tunnel: %v)", f.sourcePort, f.targetAddr, f.useTunnel)
+	log.Printf("端口转发启动: %d -> %s:%d (tunnel: %v)", f.sourcePort, f.targetHost, f.targetPort, f.useTunnel)
 
 	f.wg.Add(1)
 	go f.acceptLoop()
@@ -120,8 +118,8 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 		}
 
 		// 将连接转发到隧道，ForwardConnection 会处理连接关闭
-		if err := f.tunnelServer.ForwardConnection(clientConn, f.targetIP, f.targetPort); err != nil {
-			log.Printf("隧道转发失败 (端口 %d -> %s:%d): %v", f.sourcePort, f.targetIP, f.targetPort, err)
+		if err := f.tunnelServer.ForwardConnection(clientConn, f.targetHost, f.targetPort); err != nil {
+			log.Printf("隧道转发失败 (端口 %d -> %s:%d): %v", f.sourcePort, f.targetHost, f.targetPort, err)
 		}
 		return
 	}
@@ -134,9 +132,11 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 		KeepAlive: 30 * time.Second,
 	}
 	
-	targetConn, err := dialer.DialContext(f.ctx, "tcp", f.targetAddr)
+	// 动态解析域名并连接
+	targetAddr := fmt.Sprintf("%s:%d", f.targetHost, f.targetPort)
+	targetConn, err := dialer.DialContext(f.ctx, "tcp", targetAddr)
 	if err != nil {
-		log.Printf("连接目标失败 (端口 %d -> %s): %v", f.sourcePort, f.targetAddr, err)
+		log.Printf("连接目标失败 (端口 %d -> %s): %v", f.sourcePort, targetAddr, err)
 		return
 	}
 	defer targetConn.Close()
@@ -206,7 +206,7 @@ func NewManager() *Manager {
 }
 
 // Add 添加并启动转发器
-func (m *Manager) Add(sourcePort int, targetIP string, targetPort int) error {
+func (m *Manager) Add(sourcePort int, targetHost string, targetPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -214,7 +214,7 @@ func (m *Manager) Add(sourcePort int, targetIP string, targetPort int) error {
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewForwarder(sourcePort, targetIP, targetPort)
+	forwarder := NewForwarder(sourcePort, targetHost, targetPort)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func (m *Manager) Add(sourcePort int, targetIP string, targetPort int) error {
 }
 
 // AddTunnel 添加使用隧道的转发器
-func (m *Manager) AddTunnel(sourcePort int, targetIP string, targetPort int, tunnelServer TunnelServer) error {
+func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -232,7 +232,7 @@ func (m *Manager) AddTunnel(sourcePort int, targetIP string, targetPort int, tun
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewTunnelForwarder(sourcePort, targetIP, targetPort, tunnelServer)
+	forwarder := NewTunnelForwarder(sourcePort, targetHost, targetPort, tunnelServer)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}

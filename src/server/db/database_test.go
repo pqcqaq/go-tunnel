@@ -35,8 +35,8 @@ func TestDatabase(t *testing.T) {
 		if mapping.SourcePort != 10001 {
 			t.Errorf("期望源端口为 10001，得到 %d", mapping.SourcePort)
 		}
-		if mapping.TargetIP != "192.168.1.100" {
-			t.Errorf("期望目标 IP 为 192.168.1.100，得到 %s", mapping.TargetIP)
+		if mapping.TargetHost != "192.168.1.100" {
+			t.Errorf("期望目标 IP 为 192.168.1.100，得到 %s", mapping.TargetHost)
 		}
 		if mapping.TargetPort != 22 {
 			t.Errorf("期望目标端口为 22，得到 %d", mapping.TargetPort)

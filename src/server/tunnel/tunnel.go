@@ -78,7 +78,7 @@ type PendingConnection struct {
 	ID           uint32
 	ClientConn   net.Conn
 	TargetPort   int
-	TargetIP     string
+	TargetHost   string // 支持IP或域名
 	Created      time.Time
 	ResponseChan chan bool // 用于接收连接响应
 }
@@ -88,6 +88,7 @@ type ActiveConnection struct {
 	ID         uint32
 	ClientConn net.Conn
 	TargetPort int
+	TargetHost string // 支持IP或域名
 	TargetIP   string
 	Created    time.Time
 }
@@ -351,7 +352,7 @@ func (s *Server) handleConnectResponse(msg *TunnelMessage) {
 			ID:         connID,
 			ClientConn: pending.ClientConn,
 			TargetPort: pending.TargetPort,
-			TargetIP:   pending.TargetIP,
+			TargetHost: pending.TargetHost,
 			Created:    time.Now(),
 		}
 
@@ -359,7 +360,7 @@ func (s *Server) handleConnectResponse(msg *TunnelMessage) {
 		s.activeConns[connID] = active
 		s.connMu.Unlock()
 
-		log.Printf("连接已建立: ID=%d, 地址=%s:%d", connID, pending.TargetIP, pending.TargetPort)
+		log.Printf("连接已建立: ID=%d, 地址=%s:%d", connID, pending.TargetHost, pending.TargetPort)
 
 		// 启动数据转发
 		s.wg.Add(1)
@@ -518,7 +519,7 @@ func (s *Server) closeConnection(connID uint32) {
 }
 
 // ForwardConnection 转发连接到隧道（新的透明代理实现）
-func (s *Server) ForwardConnection(clientConn net.Conn, targetIP string, targetPort int) error {
+func (s *Server) ForwardConnection(clientConn net.Conn, targetHost string, targetPort int) error {
 	s.mu.RLock()
 	tunnelConnected := s.tunnelConn != nil
 	s.mu.RUnlock()
@@ -536,7 +537,7 @@ func (s *Server) ForwardConnection(clientConn net.Conn, targetIP string, targetP
 		ID:           connID,
 		ClientConn:   clientConn,
 		TargetPort:   targetPort,
-		TargetIP:     targetIP,
+		TargetHost:   targetHost, // 现在支持域名
 		Created:      time.Now(),
 		ResponseChan: make(chan bool, 1),
 	}
@@ -544,13 +545,13 @@ func (s *Server) ForwardConnection(clientConn net.Conn, targetIP string, targetP
 	s.connMu.Unlock()
 
 	// 发送连接请求
-	// 格式: connID(4) + targetPort(2) + targetIPLen(1) + targetIP(变长)
-	targetIPBytes := []byte(targetIP)
-	reqData := make([]byte, 7+len(targetIPBytes))
+	// 格式: connID(4) + targetPort(2) + targetHostLen(1) + targetHost(变长)
+	targetHostBytes := []byte(targetHost)
+	reqData := make([]byte, 7+len(targetHostBytes))
 	binary.BigEndian.PutUint32(reqData[0:4], connID)
 	binary.BigEndian.PutUint16(reqData[4:6], uint16(targetPort))
-	reqData[6] = byte(len(targetIPBytes))
-	copy(reqData[7:], targetIPBytes)
+	reqData[6] = byte(len(targetHostBytes))
+	copy(reqData[7:], targetHostBytes)
 
 	msg := &TunnelMessage{
 		Version: ProtocolVersion,
@@ -568,7 +569,7 @@ func (s *Server) ForwardConnection(clientConn net.Conn, targetIP string, targetP
 		return fmt.Errorf("发送连接请求超时")
 	}
 
-	log.Printf("发送连接请求: ID=%d, 地址=%s:%d", connID, targetIP, targetPort)
+	log.Printf("发送连接请求: ID=%d, 地址=%s:%d", connID, targetHost, targetPort)
 
 	// 等待连接响应
 	select {

@@ -20,8 +20,8 @@ func TestNewForwarder(t *testing.T) {
 		t.Errorf("源端口不正确，期望 8080，得到 %d", fwd.sourcePort)
 	}
 	
-	if fwd.targetAddr != "192.168.1.100:80" {
-		t.Errorf("目标地址不正确，期望 192.168.1.100:80，得到 %s", fwd.targetAddr)
+	if fwd.targetHost != "192.168.1.100:80" {
+		t.Errorf("目标地址不正确，期望 192.168.1.100:80，得到 %s", fwd.targetHost)
 	}
 	
 	if fwd.useTunnel {

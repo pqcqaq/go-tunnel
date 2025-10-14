@@ -133,7 +133,7 @@ func TestHandleCreateMapping(t *testing.T) {
 		// Port:     15000,
 		SourcePort: 15000,
 		TargetPort: 15000,
-		TargetIP: "192.168.1.100",
+		TargetHost: "192.168.1.100",
 	}
 	
 	body, _ := json.Marshal(reqBody)
@@ -163,8 +163,8 @@ func TestHandleCreateMapping(t *testing.T) {
 		t.Fatal("映射不存在")
 	}
 	
-	if mapping.TargetIP != "192.168.1.100" {
-		t.Errorf("目标 IP 不正确，期望 192.168.1.100，得到 %s", mapping.TargetIP)
+	if mapping.TargetHost != "192.168.1.100" {
+		t.Errorf("目标 IP 不正确，期望 192.168.1.100，得到 %s", mapping.TargetHost)
 	}
 }
 
@@ -187,7 +187,7 @@ func TestHandleCreateMappingInvalidPort(t *testing.T) {
 			reqBody := CreateMappingRequest{
 				SourcePort: tt.port,
 				TargetPort: tt.port,
-				TargetIP: "192.168.1.100",
+				TargetHost: "192.168.1.100",
 			}
 			
 			body, _ := json.Marshal(reqBody)
@@ -212,7 +212,7 @@ func TestHandleCreateMappingDuplicate(t *testing.T) {
 		// Port:     15000,
 		SourcePort: 15000,
 		TargetPort: 15000,
-		TargetIP: "192.168.1.100",
+		TargetHost: "192.168.1.100",
 	}
 	
 	// 第一次创建
@@ -260,7 +260,7 @@ func TestHandleCreateMappingInvalidIP(t *testing.T) {
 		// Port:     15000,
 		SourcePort: 15000,
 		TargetPort: 15000,
-		TargetIP: "invalid-ip",
+		TargetHost: "invalid-ip",
 	}
 	
 	body, _ := json.Marshal(reqBody)
@@ -283,7 +283,7 @@ func TestHandleCreateMappingEmptyIP(t *testing.T) {
 		// Port:     15000,
 		SourcePort: 15000,
 		TargetPort: 15000,
-		TargetIP: "",
+		TargetHost: "",
 	}
 	
 	body, _ := json.Marshal(reqBody)

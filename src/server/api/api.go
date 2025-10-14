@@ -37,8 +37,8 @@ func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Ser
 type CreateMappingRequest struct {
 	SourcePort int    `json:"source_port"` // 源端口（本地监听端口）
 	TargetPort int    `json:"target_port"` // 目标端口（远程服务端口）
-	TargetIP  string `json:"target_ip"`  // 目标 IP（非隧道模式使用）
-	UseTunnel bool   `json:"use_tunnel"` // 是否使用隧道模式
+	TargetHost string `json:"target_host"` // 目标主机（支持IP或域名）
+	UseTunnel  bool   `json:"use_tunnel"`  // 是否使用隧道模式
 }
 
 // RemoveMappingRequest 删除映射请求
@@ -59,6 +59,26 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/remove", h.handleRemoveMapping)
 	mux.HandleFunc("/api/mapping/list", h.handleListMappings)
 	mux.HandleFunc("/health", h.handleHealth)
+}
+
+// validateHostOrIP 验证主机名或IP地址
+func (h *Handler) validateHostOrIP(hostOrIP string) error {
+	if hostOrIP == "" {
+		return fmt.Errorf("主机名或IP地址不能为空")
+	}
+
+	// 检查是否为有效的IP地址
+	if net.ParseIP(hostOrIP) != nil {
+		return nil // 是有效的IP地址
+	}
+
+	// 尝试解析域名以验证其有效性
+	_, err := net.LookupHost(hostOrIP)
+	if err != nil {
+		return fmt.Errorf("域名解析失败: %w", err)
+	}
+
+	return nil
 }
 
 // handleCreateMapping 处理创建映射请求
@@ -97,29 +117,21 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusServiceUnavailable, "隧道未连接")
 			return
 		}
-		// 隧道模式也需要目标IP（客户端会连接到该IP）
-		if req.TargetIP == "" {
-			h.writeError(w, http.StatusBadRequest, "target_ip 不能为空")
-			return
-		}
-		if net.ParseIP(req.TargetIP) == nil {
-			h.writeError(w, http.StatusBadRequest, "target_ip 格式无效")
+		// 隧道模式也需要目标主机（客户端会连接到该主机）
+		if err := h.validateHostOrIP(req.TargetHost); err != nil {
+			h.writeError(w, http.StatusBadRequest, "目标主机格式无效: "+err.Error())
 			return
 		}
 	} else {
-		// 直接模式需要验证 IP
-		if req.TargetIP == "" {
-			h.writeError(w, http.StatusBadRequest, "非隧道模式下 target_ip 不能为空")
-			return
-		}
-		if net.ParseIP(req.TargetIP) == nil {
-			h.writeError(w, http.StatusBadRequest, "target_ip 格式无效")
+		// 直接模式需要验证主机名或IP
+		if err := h.validateHostOrIP(req.TargetHost); err != nil {
+			h.writeError(w, http.StatusBadRequest, "目标主机格式无效: "+err.Error())
 			return
 		}
 	}
 
 	// 添加到数据库
-	if err := h.db.AddMapping(req.SourcePort, req.TargetIP, req.TargetPort, req.UseTunnel); err != nil {
+	if err := h.db.AddMapping(req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "保存映射失败: "+err.Error())
 		return
 	}
@@ -128,10 +140,10 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if req.UseTunnel {
 		// 隧道模式：使用隧道转发
-		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetIP, req.TargetPort, h.tunnelServer)
+		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetHost, req.TargetPort, h.tunnelServer)
 	} else {
 		// 直接模式：直接TCP转发
-		err = h.forwarderMgr.Add(req.SourcePort, req.TargetIP, req.TargetPort)
+		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort)
 	}
 	
 	if err != nil {
@@ -141,11 +153,11 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("创建端口映射: %d -> %s:%d (tunnel: %v)", req.SourcePort, req.TargetIP, req.TargetPort, req.UseTunnel)
+	log.Printf("创建端口映射: %d -> %s:%d (tunnel: %v)", req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel)
 
 	h.writeSuccess(w, "端口映射创建成功", map[string]interface{}{
 		"source_port": req.SourcePort,
-		"target_ip":   req.TargetIP,
+		"target_host": req.TargetHost,
 		"target_port": req.TargetPort,
 		"use_tunnel":  req.UseTunnel,
 	})

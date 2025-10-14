@@ -14,7 +14,7 @@ import (
 type Mapping struct {
 	ID          int64  `json:"id"`
 	SourcePort  int    `json:"source_port"`
-	TargetIP    string `json:"target_ip"`
+	TargetHost  string `json:"target_host"` // 支持IP或域名
 	TargetPort  int    `json:"target_port"`
 	UseTunnel   bool   `json:"use_tunnel"`
 	CreatedAt   string `json:"created_at"`
@@ -61,7 +61,7 @@ func (d *Database) initTables() error {
 	CREATE TABLE IF NOT EXISTS mappings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		source_port INTEGER NOT NULL UNIQUE,
-		target_ip TEXT NOT NULL,
+		target_host TEXT NOT NULL,
 		target_port INTEGER NOT NULL,
 		use_tunnel BOOLEAN NOT NULL DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -92,6 +92,7 @@ func (d *Database) migrateDatabase() error {
 	defer rows.Close()
 
 	hasUseTunnel := false
+	hasTargetHost := false
 	for rows.Next() {
 		var cid int
 		var name, dataType string
@@ -105,7 +106,9 @@ func (d *Database) migrateDatabase() error {
 		
 		if name == "use_tunnel" {
 			hasUseTunnel = true
-			break
+		}
+		if name == "target_host" {
+			hasTargetHost = true
 		}
 	}
 
@@ -117,16 +120,58 @@ func (d *Database) migrateDatabase() error {
 		}
 	}
 
+	// 如果还使用旧的 target_ip 列，则重命名为 target_host
+	if !hasTargetHost {
+		// 检查是否存在 target_ip 列
+		rows2, err := d.db.Query("PRAGMA table_info(mappings)")
+		if err != nil {
+			return fmt.Errorf("检查表结构失败: %w", err)
+		}
+		defer rows2.Close()
+
+		hasTargetIP := false
+		for rows2.Next() {
+			var cid int
+			var name, dataType string
+			var notNull, hasDefault int
+			var defaultValue interface{}
+			
+			err := rows2.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &hasDefault)
+			if err != nil {
+				return fmt.Errorf("扫描表结构失败: %w", err)
+			}
+			
+			if name == "target_ip" {
+				hasTargetIP = true
+				break
+			}
+		}
+
+		if hasTargetIP {
+			// 重命名 target_ip 为 target_host
+			_, err := d.db.Exec("ALTER TABLE mappings RENAME COLUMN target_ip TO target_host")
+			if err != nil {
+				return fmt.Errorf("重命名 target_ip 列失败: %w", err)
+			}
+		} else {
+			// 如果既没有 target_ip 也没有 target_host，添加 target_host 列
+			_, err := d.db.Exec("ALTER TABLE mappings ADD COLUMN target_host TEXT NOT NULL DEFAULT ''")
+			if err != nil {
+				return fmt.Errorf("添加 target_host 列失败: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
 // AddMapping 添加端口映射
-func (d *Database) AddMapping(sourcePort int, targetIP string, targetPort int, useTunnel bool) error {
+func (d *Database) AddMapping(sourcePort int, targetHost string, targetPort int, useTunnel bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	query := `INSERT INTO mappings (source_port, target_ip, target_port, use_tunnel) VALUES (?, ?, ?, ?)`
-	_, err := d.db.Exec(query, sourcePort, targetIP, targetPort, useTunnel)
+	query := `INSERT INTO mappings (source_port, target_host, target_port, use_tunnel) VALUES (?, ?, ?, ?)`
+	_, err := d.db.Exec(query, sourcePort, targetHost, targetPort, useTunnel)
 	if err != nil {
 		return fmt.Errorf("添加端口映射失败: %w", err)
 	}
@@ -162,13 +207,13 @@ func (d *Database) GetMapping(sourcePort int) (*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_ip, target_port, use_tunnel, created_at FROM mappings WHERE source_port = ?`
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, created_at FROM mappings WHERE source_port = ?`
 	
 	var mapping Mapping
 	err := d.db.QueryRow(query, sourcePort).Scan(
 		&mapping.ID,
 		&mapping.SourcePort,
-		&mapping.TargetIP,
+		&mapping.TargetHost,
 		&mapping.TargetPort,
 		&mapping.UseTunnel,
 		&mapping.CreatedAt,
@@ -189,7 +234,7 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_ip, target_port, use_tunnel, created_at FROM mappings ORDER BY source_port`
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, created_at FROM mappings ORDER BY source_port`
 	
 	rows, err := d.db.Query(query)
 	if err != nil {
@@ -203,7 +248,7 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 		if err := rows.Scan(
 			&mapping.ID,
 			&mapping.SourcePort,
-			&mapping.TargetIP,
+			&mapping.TargetHost,
 			&mapping.TargetPort,
 			&mapping.UseTunnel,
 			&mapping.CreatedAt,

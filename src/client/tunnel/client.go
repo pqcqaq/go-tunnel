@@ -304,7 +304,7 @@ func (c *Client) handleTunnelMessage(msg *TunnelMessage) {
 
 // handleConnectRequest 处理连接请求
 func (c *Client) handleConnectRequest(msg *TunnelMessage) {
-	// 解析: connID(4) + targetPort(2) + targetIPLen(1) + targetIP(变长)
+	// 解析: connID(4) + targetPort(2) + targetHostLen(1) + targetHost(变长)
 	if len(msg.Data) < 7 {
 		log.Printf("连接请求数据太短")
 		return
@@ -312,19 +312,19 @@ func (c *Client) handleConnectRequest(msg *TunnelMessage) {
 
 	connID := binary.BigEndian.Uint32(msg.Data[0:4])
 	targetPort := binary.BigEndian.Uint16(msg.Data[4:6])
-	targetIPLen := int(msg.Data[6])
+	targetHostLen := int(msg.Data[6])
 	
-	if len(msg.Data) < 7+targetIPLen {
+	if len(msg.Data) < 7+targetHostLen {
 		log.Printf("连接请求数据不完整")
 		return
 	}
 	
-	targetIP := string(msg.Data[7 : 7+targetIPLen])
-	targetAddr := net.JoinHostPort(targetIP, fmt.Sprintf("%d", targetPort))
+	targetHost := string(msg.Data[7 : 7+targetHostLen])
+	targetAddr := net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort))
 
 	log.Printf("收到连接请求: ID=%d, 地址=%s", connID, targetAddr)
 
-	// 尝试连接到目标服务
+	// 尝试连接到目标服务（支持域名解析）
 	localConn, err := net.DialTimeout("tcp", targetAddr, ConnectTimeout)
 	if err != nil {
 		log.Printf("连接目标服务失败 (ID=%d -> %s): %v", connID, targetAddr, err)
