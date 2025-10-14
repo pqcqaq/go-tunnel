@@ -65,8 +65,8 @@ func (c *Config) Validate() error {
 	if c.PortRange.From > c.PortRange.End {
 		return fmt.Errorf("起始端口不能大于结束端口")
 	}
-	if c.PortRange.End-c.PortRange.From > 10000 {
-		return fmt.Errorf("端口范围过大，最多支持 10000 个端口")
+	if c.PortRange.End-c.PortRange.From > 30000 {
+		return fmt.Errorf("端口范围过大，最多支持 30000 个端口")
 	}
 	if c.Tunnel.Enabled && c.Tunnel.ListenPort <= 0 {
 		return fmt.Errorf("内网穿透端口必须大于 0")
