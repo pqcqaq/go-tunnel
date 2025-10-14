@@ -15,24 +15,24 @@ build: build-server build-client
 # 编译服务器
 build-server:
 	@echo "编译服务器..."
-	go build -o bin/server ./server
+	go build -o ../bin/server ./server
 	@echo "服务器编译完成: bin/server"
 
 # 编译客户端
 build-client:
 	@echo "编译客户端..."
-	go build -o bin/client ./client
+	go build -o ../bin/client ./client
 	@echo "客户端编译完成: bin/client"
 
 # 运行服务器
 run-server: build-server
 	@echo "启动服务器..."
-	./bin/server -config config.yaml
+	../bin/server -config config.yaml
 
 # 运行客户端
 run-client: build-client
 	@echo "启动客户端..."
-	./bin/client -server localhost:9000
+	../bin/client -server localhost:9000
 
 # 清理编译文件
 clean:
@@ -56,8 +56,8 @@ init:
 # 交叉编译 Linux
 build-linux:
 	@echo "交叉编译 Linux 版本..."
-	GOOS=linux GOARCH=amd64 go build -o bin/server-linux ./server
-	GOOS=linux GOARCH=amd64 go build -o bin/client-linux ./client
+	GOOS=linux GOARCH=amd64 go build -o ../bin/server-linux ./server
+	GOOS=linux GOARCH=amd64 go build -o ../bin/client-linux ./client
 	@echo "Linux 版本编译完成"
 
 # 格式化代码

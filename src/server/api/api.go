@@ -20,25 +20,25 @@ type Handler struct {
 	tunnelServer   *tunnel.Server
 	portRangeFrom  int
 	portRangeEnd   int
-	useTunnel      bool
 }
 
 // NewHandler 创建新的 API 处理器
-func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server, portFrom, portEnd int, useTunnel bool) *Handler {
+func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server, portFrom, portEnd int) *Handler {
 	return &Handler{
 		db:            database,
 		forwarderMgr:  fwdMgr,
 		tunnelServer:  ts,
 		portRangeFrom: portFrom,
 		portRangeEnd:  portEnd,
-		useTunnel:     useTunnel,
 	}
 }
 
 // CreateMappingRequest 创建映射请求
 type CreateMappingRequest struct {
-	Port     int    `json:"port"`      // 源端口和目标端口（相同）
-	TargetIP string `json:"target_ip"` // 目标 IP（非隧道模式使用）
+	SourcePort int    `json:"source_port"` // 源端口（本地监听端口）
+	TargetPort int    `json:"target_port"` // 目标端口（远程服务端口）
+	TargetIP  string `json:"target_ip"`  // 目标 IP（非隧道模式使用）
+	UseTunnel bool   `json:"use_tunnel"` // 是否使用隧道模式
 }
 
 // RemoveMappingRequest 删除映射请求
@@ -75,57 +75,72 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验证端口范围
-	if req.Port < h.portRangeFrom || req.Port > h.portRangeEnd {
+	if req.SourcePort < h.portRangeFrom || req.SourcePort > h.portRangeEnd {
 		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("端口必须在 %d-%d 范围内", h.portRangeFrom, h.portRangeEnd))
 		return
 	}
 
 	// 检查端口是否已被使用
-	if h.forwarderMgr.Exists(req.Port) {
+	if h.forwarderMgr.Exists(req.SourcePort) {
 		h.writeError(w, http.StatusConflict, "端口已被占用")
 		return
 	}
 
-	// 非隧道模式需要验证 IP
-	if !h.useTunnel {
-		if req.TargetIP == "" {
-			h.writeError(w, http.StatusBadRequest, "target_ip 不能为空")
+	// 根据请求决定使用哪种模式
+	if req.UseTunnel {
+		// 隧道模式，检查隧道服务器是否可用
+		if h.tunnelServer == nil {
+			h.writeError(w, http.StatusServiceUnavailable, "隧道服务未启用")
 			return
 		}
-		if net.ParseIP(req.TargetIP) == nil {
-			h.writeError(w, http.StatusBadRequest, "target_ip 格式无效")
-			return
-		}
-	} else {
-		// 隧道模式，检查隧道是否连接
 		if !h.tunnelServer.IsConnected() {
 			h.writeError(w, http.StatusServiceUnavailable, "隧道未连接")
 			return
 		}
 		// 隧道模式使用本地地址
 		req.TargetIP = "127.0.0.1"
+	} else {
+		// 直接模式需要验证 IP
+		if req.TargetIP == "" {
+			h.writeError(w, http.StatusBadRequest, "非隧道模式下 target_ip 不能为空")
+			return
+		}
+		if net.ParseIP(req.TargetIP) == nil {
+			h.writeError(w, http.StatusBadRequest, "target_ip 格式无效")
+			return
+		}
 	}
 
 	// 添加到数据库
-	if err := h.db.AddMapping(req.Port, req.TargetIP, req.Port); err != nil {
+	if err := h.db.AddMapping(req.SourcePort, req.TargetIP, req.TargetPort, req.UseTunnel); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "保存映射失败: "+err.Error())
 		return
 	}
 
 	// 启动转发器
-	if err := h.forwarderMgr.Add(req.Port, req.TargetIP, req.Port); err != nil {
+	var err error
+	if req.UseTunnel {
+		// 隧道模式：使用隧道转发
+		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.SourcePort, h.tunnelServer)
+	} else {
+		// 直接模式：直接TCP转发
+		err = h.forwarderMgr.Add(req.SourcePort, req.TargetIP, req.TargetPort)
+	}
+	
+	if err != nil {
 		// 回滚数据库操作
-		h.db.RemoveMapping(req.Port)
+		h.db.RemoveMapping(req.SourcePort)
 		h.writeError(w, http.StatusInternalServerError, "启动转发失败: "+err.Error())
 		return
 	}
 
-	log.Printf("创建端口映射: %d -> %s:%d", req.Port, req.TargetIP, req.Port)
+	log.Printf("创建端口映射: %d -> %s:%d (tunnel: %v)", req.SourcePort, req.TargetIP, req.TargetPort, req.UseTunnel)
 
 	h.writeSuccess(w, "端口映射创建成功", map[string]interface{}{
-		"port":       req.Port,
-		"target_ip":  req.TargetIP,
-		"use_tunnel": h.useTunnel,
+		"source_port": req.SourcePort,
+		"target_ip":   req.TargetIP,
+		"target_port": req.TargetPort,
+		"use_tunnel":  req.UseTunnel,
 	})
 }
 
@@ -187,9 +202,8 @@ func (h *Handler) handleListMappings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeSuccess(w, "获取映射列表成功", map[string]interface{}{
-		"mappings":   mappings,
-		"count":      len(mappings),
-		"use_tunnel": h.useTunnel,
+		"mappings": mappings,
+		"count":    len(mappings),
 	})
 }
 
@@ -197,11 +211,11 @@ func (h *Handler) handleListMappings(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"status":           "ok",
-		"tunnel_enabled":   h.useTunnel,
+		"tunnel_enabled":   h.tunnelServer != nil,
 		"tunnel_connected": false,
 	}
 
-	if h.useTunnel {
+	if h.tunnelServer != nil {
 		status["tunnel_connected"] = h.tunnelServer.IsConnected()
 	}
 

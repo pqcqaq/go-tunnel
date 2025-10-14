@@ -64,8 +64,22 @@ func main() {
 			continue
 		}
 
-		log.Printf("恢复端口映射: %d -> %s:%d", mapping.SourcePort, mapping.TargetIP, mapping.TargetPort)
-		if err := fwdManager.Add(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort); err != nil {
+		log.Printf("恢复端口映射: %d -> %s:%d (tunnel: %v)", mapping.SourcePort, mapping.TargetIP, mapping.TargetPort, mapping.UseTunnel)
+		
+		var err error
+		if mapping.UseTunnel {
+			// 隧道模式：检查隧道服务器是否可用
+			if !cfg.Tunnel.Enabled || tunnelServer == nil {
+				log.Printf("警告: 端口 %d 需要隧道模式但隧道服务未启用，跳过", mapping.SourcePort)
+				continue
+			}
+			err = fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetPort, tunnelServer)
+		} else {
+			// 直接模式
+			err = fwdManager.Add(mapping.SourcePort, mapping.TargetIP, mapping.TargetPort)
+		}
+		
+		if err != nil {
 			log.Printf("警告: 启动端口 %d 的转发失败: %v", mapping.SourcePort, err)
 		}
 	}
@@ -80,7 +94,6 @@ func main() {
 		tunnelServer,
 		cfg.PortRange.From,
 		cfg.PortRange.End,
-		cfg.Tunnel.Enabled,
 	)
 
 	// 启动 HTTP API 服务器
@@ -107,7 +120,7 @@ func main() {
 	log.Println("\n接收到关闭信号，正在优雅关闭...")
 
 	// 创建关闭上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// 停止所有转发器
