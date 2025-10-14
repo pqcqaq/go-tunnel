@@ -5,10 +5,10 @@ bin/
 *.dll
 *.so
 *.dylib
-server
-client
-server-linux
-client-linux
+/server
+/client
+/server-linux
+/client-linux
 
 # 测试文件
 *.test
