@@ -38,6 +38,7 @@ const (
 	// 超时设置
 	ConnectTimeout = 10 * time.Second // 连接超时
 	ReadTimeout    = 30 * time.Second // 读取超时
+	KeepAliveInterval = 15 * time.Second // 心跳间隔
 )
 
 // TunnelMessage 隧道消息
@@ -122,7 +123,7 @@ func (c *Client) connectLoop() {
 
 		// 处理连接
 		var connWg sync.WaitGroup
-		connWg.Add(2)
+		connWg.Add(3)
 		go func() {
 			defer connWg.Done()
 			c.handleServerRead(conn)
@@ -130,6 +131,10 @@ func (c *Client) connectLoop() {
 		go func() {
 			defer connWg.Done()
 			c.handleServerWrite(conn)
+		}()
+		go func() {
+			defer connWg.Done()
+			c.keepAliveLoop(conn)
 		}()
 
 		// 等待连接断开
@@ -502,4 +507,35 @@ func isTimeout(err error) bool {
 		return netErr.Timeout()
 	}
 	return false
+}
+
+// keepAliveLoop 心跳循环
+func (c *Client) keepAliveLoop(conn net.Conn) {
+	ticker := time.NewTicker(KeepAliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			// 发送心跳消息
+			keepAliveMsg := &TunnelMessage{
+				Version: ProtocolVersion,
+				Type:    MsgTypeKeepAlive,
+				Length:  0,
+				Data:    nil,
+			}
+
+			select {
+			case c.sendChan <- keepAliveMsg:
+				log.Printf("发送心跳消息")
+			case <-time.After(5 * time.Second):
+				log.Printf("发送心跳消息超时")
+				return
+			case <-c.ctx.Done():
+				return
+			}
+		}
+	}
 }
