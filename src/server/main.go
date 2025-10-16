@@ -12,6 +12,7 @@ import (
 	"port-forward/server/db"
 	"port-forward/server/forwarder"
 	"port-forward/server/tunnel"
+	"port-forward/server/utils"
 	"syscall"
 	"time"
 )
@@ -60,8 +61,16 @@ func main() {
 
 	for _, mapping := range mappings {
 		// 验证端口在范围内
-		if mapping.SourcePort < cfg.PortRange.From || mapping.SourcePort > cfg.PortRange.End {
-			log.Printf("警告: 端口 %d 超出范围，跳过", mapping.SourcePort)
+		// if mapping.SourcePort < cfg.PortRange.From || mapping.SourcePort > cfg.PortRange.End {
+		// 	log.Printf("警告: 端口 %d 超出范围，跳过", mapping.SourcePort)
+		// 	continue
+		// }
+
+		used := utils.PortCheck(mapping.SourcePort)
+
+		if used {
+			log.Printf("警告: 端口 %d 已被占!", mapping.SourcePort)
+			os.Exit(1)
 			continue
 		}
 
@@ -91,8 +100,8 @@ func main() {
 		database,
 		fwdManager,
 		tunnelServer,
-		cfg.PortRange.From,
-		cfg.PortRange.End,
+		// cfg.PortRange.From,
+		// cfg.PortRange.End,
 	)
 
 	// 启动 HTTP API 服务器
@@ -123,7 +132,7 @@ func main() {
 
 	log.Println("===========================================")
 	log.Printf("服务器启动成功!")
-	log.Printf("端口范围: %d-%d", cfg.PortRange.From, cfg.PortRange.End)
+	// log.Printf("端口范围: %d-%d", cfg.PortRange.From, cfg.PortRange.End)
 	log.Printf("HTTP API: http://localhost:%d", cfg.API.ListenPort)
 	// log.Printf("调试接口: http://localhost:%d/debug/pprof/", pprofPort)
 	if cfg.Tunnel.Enabled {

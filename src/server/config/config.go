@@ -9,7 +9,7 @@ import (
 
 // Config 应用配置结构
 type Config struct {
-	PortRange PortRangeConfig `yaml:"port_range"`
+	// PortRange PortRangeConfig `yaml:"port_range"`
 	Tunnel    TunnelConfig    `yaml:"tunnel"`
 	API       APIConfig       `yaml:"api"`
 	Database  DatabaseConfig  `yaml:"database"`
@@ -59,15 +59,15 @@ func Load(path string) (*Config, error) {
 
 // Validate 验证配置的有效性
 func (c *Config) Validate() error {
-	if c.PortRange.From <= 0 || c.PortRange.End <= 0 {
-		return fmt.Errorf("端口范围必须大于 0")
-	}
-	if c.PortRange.From > c.PortRange.End {
-		return fmt.Errorf("起始端口不能大于结束端口")
-	}
-	if c.PortRange.End-c.PortRange.From > 30000 {
-		return fmt.Errorf("端口范围过大，最多支持 30000 个端口")
-	}
+	// if c.PortRange.From <= 0 || c.PortRange.End <= 0 {
+	// 	return fmt.Errorf("端口范围必须大于 0")
+	// }
+	// if c.PortRange.From > c.PortRange.End {
+	// 	return fmt.Errorf("起始端口不能大于结束端口")
+	// }
+	// if c.PortRange.End-c.PortRange.From > 30000 {
+	// 	return fmt.Errorf("端口范围过大，最多支持 30000 个端口")
+	// }
 	if c.Tunnel.Enabled && c.Tunnel.ListenPort <= 0 {
 		return fmt.Errorf("内网穿透端口必须大于 0")
 	}

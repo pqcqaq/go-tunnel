@@ -10,6 +10,7 @@ import (
 	"port-forward/server/forwarder"
 	"port-forward/server/stats"
 	"port-forward/server/tunnel"
+	"port-forward/server/utils"
 	"strconv"
 	"time"
 )
@@ -24,13 +25,13 @@ type Handler struct {
 }
 
 // NewHandler 创建新的 API 处理器
-func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server, portFrom, portEnd int) *Handler {
+func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server) *Handler {
 	return &Handler{
 		db:            database,
 		forwarderMgr:  fwdMgr,
 		tunnelServer:  ts,
-		portRangeFrom: portFrom,
-		portRangeEnd:  portEnd,
+		// portRangeFrom: portFrom,
+		// portRangeEnd:  portEnd,
 	}
 }
 
@@ -105,6 +106,12 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 
 	// 检查端口是否已被使用
 	if h.forwarderMgr.Exists(req.SourcePort) {
+		h.writeError(w, http.StatusConflict, "端口已被占用")
+		return
+	}
+
+	used := utils.PortCheck(req.SourcePort)
+	if used {
 		h.writeError(w, http.StatusConflict, "端口已被占用")
 		return
 	}

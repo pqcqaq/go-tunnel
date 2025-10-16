@@ -40,7 +40,7 @@ func setupTestHandler(t *testing.T, useTunnel bool) (*Handler, *db.Database, fun
 		tunnelServer.Start()
 	}
 	
-	handler := NewHandler(database, fwdMgr, tunnelServer, 10000, 20000)
+	handler := NewHandler(database, fwdMgr, tunnelServer)
 	
 	cleanup := func() {
 		fwdMgr.StopAll()
@@ -543,7 +543,7 @@ func BenchmarkHandleHealth(b *testing.B) {
 	defer database.Close()
 	
 	fwdMgr := forwarder.NewManager()
-	handler := NewHandler(database, fwdMgr, nil, 10000, 20000)
+	handler := NewHandler(database, fwdMgr, nil)
 	
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	
@@ -568,7 +568,7 @@ func BenchmarkHandleListMappings(b *testing.B) {
 	}
 	
 	fwdMgr := forwarder.NewManager()
-	handler := NewHandler(database, fwdMgr, nil, 10000, 20000)
+	handler := NewHandler(database, fwdMgr, nil)
 	
 	req := httptest.NewRequest(http.MethodGet, "/api/mapping/list", nil)
 	
