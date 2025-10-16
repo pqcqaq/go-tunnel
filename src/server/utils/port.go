@@ -11,8 +11,8 @@ func PortCheck(port int) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%s", strconv.Itoa(port)))
 
 	if err != nil {
-		return false
+		return true
 	}
 	defer l.Close()
-	return true
+	return false
 }

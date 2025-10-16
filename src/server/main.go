@@ -69,9 +69,7 @@ func main() {
 		used := utils.PortCheck(mapping.SourcePort)
 
 		if used {
-			log.Printf("警告: 端口 %d 已被占!", mapping.SourcePort)
-			os.Exit(1)
-			continue
+			log.Fatalf("警告: 端口 %d 已被占! 将退出程序", mapping.SourcePort)
 		}
 
 		var err error

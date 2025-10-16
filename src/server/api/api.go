@@ -20,8 +20,8 @@ type Handler struct {
 	db             *db.Database
 	forwarderMgr   *forwarder.Manager
 	tunnelServer   *tunnel.Server
-	portRangeFrom  int
-	portRangeEnd   int
+	// portRangeFrom  int
+	// portRangeEnd   int
 }
 
 // NewHandler 创建新的 API 处理器
@@ -99,20 +99,20 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验证端口范围
-	if req.SourcePort < h.portRangeFrom || req.SourcePort > h.portRangeEnd {
-		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("端口必须在 %d-%d 范围内", h.portRangeFrom, h.portRangeEnd))
-		return
-	}
+	// if req.SourcePort < h.portRangeFrom || req.SourcePort > h.portRangeEnd {
+	// 	h.writeError(w, http.StatusBadRequest, fmt.Sprintf("端口必须在 %d-%d 范围内", h.portRangeFrom, h.portRangeEnd))
+	// 	return
+	// }
 
 	// 检查端口是否已被使用
 	if h.forwarderMgr.Exists(req.SourcePort) {
-		h.writeError(w, http.StatusConflict, "端口已被占用")
+		h.writeError(w, http.StatusConflict, "端口已被占用, 已经存在该映射")
 		return
 	}
 
 	used := utils.PortCheck(req.SourcePort)
 	if used {
-		h.writeError(w, http.StatusConflict, "端口已被占用")
+		h.writeError(w, http.StatusConflict, "系统内端口已被占用")
 		return
 	}
 
@@ -187,10 +187,10 @@ func (h *Handler) handleRemoveMapping(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验证端口范围
-	if req.Port < h.portRangeFrom || req.Port > h.portRangeEnd {
-		h.writeError(w, http.StatusBadRequest, fmt.Sprintf("端口必须在 %d-%d 范围内", h.portRangeFrom, h.portRangeEnd))
-		return
-	}
+	// if req.Port < h.portRangeFrom || req.Port > h.portRangeEnd {
+	// 	h.writeError(w, http.StatusBadRequest, fmt.Sprintf("端口必须在 %d-%d 范围内", h.portRangeFrom, h.portRangeEnd))
+	// 	return
+	// }
 
 	// 检查映射是否存在
 	if !h.forwarderMgr.Exists(req.Port) {
