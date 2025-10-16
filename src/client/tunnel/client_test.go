@@ -152,16 +152,20 @@ func TestClientHandleConnectRequest(t *testing.T) {
 	
 	client := NewClient("127.0.0.1:9000")
 	
-	// 创建连接请求消息
+	// 创建连接请求消息（新格式：connID + port + hostLen + host）
 	connID := uint32(12345)
-	reqData := make([]byte, 6)
+	targetHost := "127.0.0.1"
+	targetHostBytes := []byte(targetHost)
+	reqData := make([]byte, 7+len(targetHostBytes))
 	binary.BigEndian.PutUint32(reqData[0:4], connID)
 	binary.BigEndian.PutUint16(reqData[4:6], uint16(localPort))
+	reqData[6] = byte(len(targetHostBytes))
+	copy(reqData[7:], targetHostBytes)
 	
 	msg := &TunnelMessage{
 		Version: ProtocolVersion,
 		Type:    MsgTypeConnectRequest,
-		Length:  6,
+		Length:  uint32(len(reqData)),
 		Data:    reqData,
 	}
 	

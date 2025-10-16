@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"port-forward/server/db"
 	"port-forward/server/forwarder"
+	"port-forward/server/stats"
 	"port-forward/server/tunnel"
 	"strconv"
 	"time"
@@ -58,6 +59,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/create", h.handleCreateMapping)
 	mux.HandleFunc("/api/mapping/remove", h.handleRemoveMapping)
 	mux.HandleFunc("/api/mapping/list", h.handleListMappings)
+	mux.HandleFunc("/api/stats/traffic", h.handleGetTrafficStats)
+	mux.HandleFunc("/api/stats/monitor", h.handleTrafficMonitor)
 	mux.HandleFunc("/health", h.handleHealth)
 }
 
@@ -277,4 +280,56 @@ func Start(handler *Handler, port int) error {
 
 	log.Printf("HTTP API 服务启动: 端口 %d", port)
 	return server.ListenAndServe()
+}
+
+// handleGetTrafficStats 获取流量统计
+func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.writeError(w, http.StatusMethodNotAllowed, "只支持 GET 方法")
+		return
+	}
+
+	// 获取隧道流量统计
+	var tunnelStats stats.TrafficStats
+	if h.tunnelServer != nil {
+		tunnelStats = h.tunnelServer.GetTrafficStats()
+	}
+
+	// 获取所有端口映射的流量统计
+	forwarderStats := h.forwarderMgr.GetAllTrafficStats()
+	
+	// 构建响应
+	mappings := make([]stats.PortTrafficStats, 0, len(forwarderStats))
+	var totalSent, totalReceived uint64
+	
+	for port, stat := range forwarderStats {
+		mappings = append(mappings, stats.PortTrafficStats{
+			Port:          port,
+			BytesSent:     stat.BytesSent,
+			BytesReceived: stat.BytesReceived,
+			LastUpdate:    stat.LastUpdate,
+		})
+		totalSent += stat.BytesSent
+		totalReceived += stat.BytesReceived
+	}
+	
+	// 加上隧道的流量
+	totalSent += tunnelStats.BytesSent
+	totalReceived += tunnelStats.BytesReceived
+	
+	response := stats.AllTrafficStats{
+		Tunnel:        tunnelStats,
+		Mappings:      mappings,
+		TotalSent:     totalSent,
+		TotalReceived: totalReceived,
+		Timestamp:     time.Now().Unix(),
+	}
+
+	h.writeSuccess(w, "获取流量统计成功", response)
+}
+
+// handleTrafficMonitor 流量监控页面
+func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, html)
 }

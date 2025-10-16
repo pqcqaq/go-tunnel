@@ -6,7 +6,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"port-forward/server/stats"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +16,7 @@ import (
 type TunnelServer interface {
 	ForwardConnection(clientConn net.Conn, targetIP string, targetPort int) error
 	IsConnected() bool
+	GetTrafficStats() stats.TrafficStats
 }
 
 // Forwarder 端口转发器
@@ -27,6 +30,10 @@ type Forwarder struct {
 	wg           sync.WaitGroup
 	tunnelServer TunnelServer
 	useTunnel    bool
+	
+	// 流量统计（使用原子操作）
+	bytesSent     uint64 // 发送字节数
+	bytesReceived uint64 // 接收字节数
 }
 
 // NewForwarder 创建新的端口转发器
@@ -142,26 +149,44 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	defer targetConn.Close()
 
 	// 双向转发
-	errChan := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	// 客户端 -> 目标
 	go func() {
-		_, err := io.Copy(targetConn, clientConn)
-		errChan <- err
+		defer wg.Done()
+		n, _ := io.Copy(targetConn, clientConn)
+		atomic.AddUint64(&f.bytesSent, uint64(n))
+		// 关闭目标连接的写入端，通知对方不会再发送数据
+		if tcpConn, ok := targetConn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
 	}()
 
 	// 目标 -> 客户端
 	go func() {
-		_, err := io.Copy(clientConn, targetConn)
-		errChan <- err
+		defer wg.Done()
+		n, _ := io.Copy(clientConn, targetConn)
+		atomic.AddUint64(&f.bytesReceived, uint64(n))
+		// 关闭客户端连接的写入端
+		if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
 	}()
 
-	// 等待任一方向完成或出错
+	// 创建一个 channel 来等待完成
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// 等待两个方向都完成或上下文取消
 	select {
-	case <-errChan:
-		// 连接已关闭或出错
+	case <-done:
+		// 两个方向都已完成
 	case <-f.ctx.Done():
-		// 转发器被停止
+		// 转发器被停止，连接会在 defer 中关闭
 	}
 }
 
@@ -279,4 +304,26 @@ func (m *Manager) StopAll() {
 	}
 
 	m.forwarders = make(map[int]*Forwarder)
+}
+
+// GetTrafficStats 获取流量统计信息
+func (f *Forwarder) GetTrafficStats() stats.TrafficStats {
+	return stats.TrafficStats{
+		BytesSent:     atomic.LoadUint64(&f.bytesSent),
+		BytesReceived: atomic.LoadUint64(&f.bytesReceived),
+		LastUpdate:    time.Now().Unix(),
+	}
+}
+
+// GetAllTrafficStats 获取所有转发器的流量统计
+func (m *Manager) GetAllTrafficStats() map[int]stats.TrafficStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	statsMap := make(map[int]stats.TrafficStats)
+	for port, forwarder := range m.forwarders {
+		statsMap[port] = forwarder.GetTrafficStats()
+	}
+	
+	return statsMap
 }

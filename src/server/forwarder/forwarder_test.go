@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"port-forward/server/stats"
 	"testing"
 	"time"
 )
@@ -20,8 +21,12 @@ func TestNewForwarder(t *testing.T) {
 		t.Errorf("源端口不正确，期望 8080，得到 %d", fwd.sourcePort)
 	}
 	
-	if fwd.targetHost != "192.168.1.100:80" {
-		t.Errorf("目标地址不正确，期望 192.168.1.100:80，得到 %s", fwd.targetHost)
+	if fwd.targetHost != "192.168.1.100" {
+		t.Errorf("目标主机不正确，期望 192.168.1.100，得到 %s", fwd.targetHost)
+	}
+	
+	if fwd.targetPort != 80 {
+		t.Errorf("目标端口不正确，期望 80，得到 %d", fwd.targetPort)
 	}
 	
 	if fwd.useTunnel {
@@ -42,6 +47,10 @@ func (m *mockTunnelServer) ForwardConnection(clientConn net.Conn, targetIp strin
 
 func (m *mockTunnelServer) IsConnected() bool {
 	return m.connected
+}
+ 
+func  (m *mockTunnelServer) GetTrafficStats() stats.TrafficStats {
+	return stats.TrafficStats{}
 }
 
 // TestNewTunnelForwarder 测试创建隧道转发器

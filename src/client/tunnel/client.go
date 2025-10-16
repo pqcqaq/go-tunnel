@@ -185,6 +185,7 @@ func (c *Client) handleServerRead(conn net.Conn, connCtx context.Context, connCa
 	defer conn.Close()
 
 	for {
+		// 检查是否应该退出
 		select {
 		case <-c.ctx.Done():
 			return
@@ -193,15 +194,19 @@ func (c *Client) handleServerRead(conn net.Conn, connCtx context.Context, connCa
 		default:
 		}
 
+		// 设置读取超时，避免无限阻塞
+		conn.SetReadDeadline(time.Now().Add(ReadTimeout))
 		msg, err := c.readTunnelMessage(conn)
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !isTimeout(err) {
 				log.Printf("读取隧道消息失败: %v", err)
 			}
 			connCancel() // 通知其他协程退出
 			return
 		}
 
+		// 重置读取超时
+		conn.SetReadDeadline(time.Time{})
 		c.handleTunnelMessage(msg)
 	}
 }
@@ -265,6 +270,10 @@ func (c *Client) readTunnelMessage(conn net.Conn) (*TunnelMessage, error) {
 
 // writeTunnelMessage 写入隧道消息
 func (c *Client) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
+	// 设置写入超时，防止阻塞
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{}) // 重置超时
+	
 	// 构建消息头
 	header := make([]byte, HeaderSize)
 	header[0] = msg.Version
@@ -273,13 +282,13 @@ func (c *Client) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
 
 	// 写入消息头
 	if _, err := conn.Write(header); err != nil {
-		return err
+		return fmt.Errorf("写入消息头失败: %w", err)
 	}
 
 	// 写入数据
 	if msg.Length > 0 && msg.Data != nil {
 		if _, err := conn.Write(msg.Data); err != nil {
-			return err
+			return fmt.Errorf("写入消息数据失败: %w", err)
 		}
 	}
 
@@ -368,11 +377,24 @@ func (c *Client) handleDataMessage(msg *TunnelMessage) {
 	c.connMu.RUnlock()
 
 	if !exists {
-		log.Printf("收到未知连接的数据: %d", connID)
+		log.Printf("收到未知连接的数据: %d，发送关闭消息", connID)
+		// 连接不存在，发送关闭消息通知对端
+		closeData := make([]byte, 4)
+		binary.BigEndian.PutUint32(closeData, connID)
+		closeMsg := &TunnelMessage{
+			Version: ProtocolVersion,
+			Type:    MsgTypeClose,
+			Length:  4,
+			Data:    closeData,
+		}
+		select {
+		case c.sendChan <- closeMsg:
+		default:
+		}
 		return
 	}
 
-		if _, err := connection.Conn.Write(data); err != nil {
+	if _, err := connection.Conn.Write(data); err != nil {
 		log.Printf("写入目标连接失败 (ID=%d): %v", connID, err)
 		c.closeConnection(connID)
 	}
@@ -391,19 +413,9 @@ func (c *Client) handleCloseMessage(msg *TunnelMessage) {
 
 // handleKeepAlive 处理心跳消息
 func (c *Client) handleKeepAlive(msg *TunnelMessage) {
-	// 回应心跳
-	response := &TunnelMessage{
-		Version: ProtocolVersion,
-		Type:    MsgTypeKeepAlive,
-		Length:  0,
-		Data:    nil,
-	}
-
-	select {
-	case c.sendChan <- response:
-	default:
-		log.Printf("发送心跳响应失败: 发送队列已满")
-	}
+	// 客户端收到服务器的心跳响应，不需要再回应
+	// 这样避免心跳消息的无限循环
+	// log.Printf("收到服务器心跳响应")
 }
 
 // sendConnectResponse 发送连接响应
@@ -433,21 +445,37 @@ func (c *Client) forwardData(connection *LocalConnection) {
 	buffer := make([]byte, 32*1024)
 	for {
 		select {
-		case <-connection.closeChan:
-			return
 		case <-c.ctx.Done():
+			return
+		case <-connection.closeChan:
 			return
 		default:
 		}
 
+		// 设置读取超时
 		connection.Conn.SetReadDeadline(time.Now().Add(ReadTimeout))
 		n, err := connection.Conn.Read(buffer)
+		
 		if err != nil {
-			if err != io.EOF && !isTimeout(err) {
+			// 任何错误都应该终止转发
+			if err == io.EOF {
+				log.Printf("目标连接正常关闭 (ID=%d)", connection.ID)
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Printf("目标连接超时 (ID=%d)", connection.ID)
+			} else {
 				log.Printf("读取目标连接失败 (ID=%d): %v", connection.ID, err)
 			}
 			return
 		}
+
+		// 读取到0字节，连接已关闭
+		if n == 0 {
+			log.Printf("目标连接已关闭 (ID=%d, 读取0字节)", connection.ID)
+			return
+		}
+
+		// 重置读取超时
+		connection.Conn.SetReadDeadline(time.Time{})
 
 		// 发送数据到隧道
 		dataMsg := make([]byte, 4+n)
@@ -463,10 +491,13 @@ func (c *Client) forwardData(connection *LocalConnection) {
 
 		select {
 		case c.sendChan <- msg:
+			// 数据已发送
 		case <-time.After(5 * time.Second):
 			log.Printf("发送数据超时 (ID=%d)", connection.ID)
 			return
 		case <-c.ctx.Done():
+			return
+		case <-connection.closeChan:
 			return
 		}
 	}
@@ -481,9 +512,17 @@ func (c *Client) closeConnection(connID uint32) {
 		connection.closeOnce.Do(func() {
 			close(connection.closeChan)
 		})
-		connection.Conn.Close()
+		// 确保连接被关闭
+		if connection.Conn != nil {
+			connection.Conn.Close()
+		}
 	}
 	c.connMu.Unlock()
+
+	if !exists {
+		// 连接不存在，无需发送关闭消息
+		return
+	}
 
 	// 发送关闭消息
 	closeData := make([]byte, 4)
@@ -498,12 +537,11 @@ func (c *Client) closeConnection(connID uint32) {
 
 	select {
 	case c.sendChan <- msg:
-	default:
-		// 发送队列满，忽略
-	}
-
-	if exists {
 		log.Printf("连接已关闭: ID=%d", connID)
+	case <-time.After(1 * time.Second):
+		log.Printf("发送关闭消息超时: ID=%d", connID)
+	case <-c.ctx.Done():
+		log.Printf("客户端关闭，跳过发送关闭消息: ID=%d", connID)
 	}
 }
 

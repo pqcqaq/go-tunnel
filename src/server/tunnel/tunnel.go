@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"port-forward/server/stats"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,7 +39,7 @@ const (
 	
 	// 超时设置
 	ConnectTimeout = 10 * time.Second // 连接超时
-	ReadTimeout    = 30 * time.Second // 读取超时
+	ReadTimeout    = 300 * time.Second // 读取超时
 	KeepAliveInterval = 15 * time.Second // 心跳间隔
 )
 
@@ -111,6 +113,10 @@ type Server struct {
 	
 	// 消息队列
 	sendChan chan *TunnelMessage
+	
+	// 流量统计（使用原子操作）
+	bytesSent     uint64 // 通过隧道发送的总字节数
+	bytesReceived uint64 // 通过隧道接收的总字节数
 }
 
 // NewServer 创建新的隧道服务器
@@ -214,20 +220,25 @@ func (s *Server) handleTunnelRead(conn net.Conn) {
 	}()
 
 	for {
+		// 检查是否应该退出
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
 		}
 
+		// 设置读取超时，避免无限阻塞
+		conn.SetReadDeadline(time.Now().Add(ReadTimeout))
 		msg, err := s.readTunnelMessage(conn)
 		if err != nil {
-			if err != io.EOF {
+			if err != io.EOF && !isTimeout(err) {
 				log.Printf("读取隧道消息失败: %v", err)
 			}
 			return
 		}
 
+		// 重置读取超时
+		conn.SetReadDeadline(time.Time{})
 		s.handleTunnelMessage(msg)
 	}
 }
@@ -256,6 +267,9 @@ func (s *Server) readTunnelMessage(conn net.Conn) (*TunnelMessage, error) {
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, err
 	}
+	
+	// 统计接收字节数
+	s.addBytesReceived(uint64(HeaderSize))
 
 	version := header[0]
 	msgType := header[1]
@@ -276,6 +290,8 @@ func (s *Server) readTunnelMessage(conn net.Conn) (*TunnelMessage, error) {
 		if _, err := io.ReadFull(conn, data); err != nil {
 			return nil, err
 		}
+		// 统计接收字节数
+		s.addBytesReceived(uint64(dataLen))
 	}
 
 	return &TunnelMessage{
@@ -288,6 +304,10 @@ func (s *Server) readTunnelMessage(conn net.Conn) (*TunnelMessage, error) {
 
 // writeTunnelMessage 写入隧道消息
 func (s *Server) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
+	// 设置写入超时，防止阻塞
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{}) // 重置超时
+	
 	// 构建消息头
 	header := make([]byte, HeaderSize)
 	header[0] = msg.Version
@@ -296,14 +316,19 @@ func (s *Server) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
 
 	// 写入消息头
 	if _, err := conn.Write(header); err != nil {
-		return err
+		return fmt.Errorf("写入消息头失败: %w", err)
 	}
+	
+	// 统计发送字节数
+	s.addBytesSent(uint64(HeaderSize))
 
 	// 写入数据
 	if msg.Length > 0 && msg.Data != nil {
 		if _, err := conn.Write(msg.Data); err != nil {
-			return err
+			return fmt.Errorf("写入消息数据失败: %w", err)
 		}
+		// 统计发送字节数
+		s.addBytesSent(uint64(msg.Length))
 	}
 
 	return nil
@@ -401,7 +426,20 @@ func (s *Server) handleDataMessage(msg *TunnelMessage) {
 	s.connMu.RUnlock()
 
 	if !exists {
-		log.Printf("收到未知连接的数据: %d", connID)
+		log.Printf("收到未知连接的数据: %d，发送关闭消息", connID)
+		// 连接不存在，发送关闭消息通知对端
+		closeData := make([]byte, 4)
+		binary.BigEndian.PutUint32(closeData, connID)
+		closeMsg := &TunnelMessage{
+			Version: ProtocolVersion,
+			Type:    MsgTypeClose,
+			Length:  4,
+			Data:    closeData,
+		}
+		select {
+		case s.sendChan <- closeMsg:
+		default:
+		}
 		return
 	}
 
@@ -425,7 +463,8 @@ func (s *Server) handleCloseMessage(msg *TunnelMessage) {
 
 // handleKeepAlive 处理心跳消息
 func (s *Server) handleKeepAlive(msg *TunnelMessage) {
-	// 回应心跳
+	// 服务器收到客户端的心跳请求，回应一次即可
+	// 不要形成心跳循环
 	response := &TunnelMessage{
 		Version: ProtocolVersion,
 		Type:    MsgTypeKeepAlive,
@@ -454,14 +493,30 @@ func (s *Server) forwardData(active *ActiveConnection) {
 		default:
 		}
 
+		// 设置读取超时
 		active.ClientConn.SetReadDeadline(time.Now().Add(ReadTimeout))
 		n, err := active.ClientConn.Read(buffer)
+		
 		if err != nil {
-			if err != io.EOF && !isTimeout(err) {
+			// 任何错误都应该终止转发，包括超时
+			if err == io.EOF {
+				log.Printf("客户端连接正常关闭 (ID=%d)", active.ID)
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Printf("客户端连接超时 (ID=%d)", active.ID)
+			} else {
 				log.Printf("读取客户端连接失败 (ID=%d): %v", active.ID, err)
 			}
 			return
 		}
+
+		// 读取到0字节，连接已关闭
+		if n == 0 {
+			log.Printf("客户端连接已关闭 (ID=%d, 读取0字节)", active.ID)
+			return
+		}
+
+		// 重置读取超时
+		active.ClientConn.SetReadDeadline(time.Time{})
 
 		// 发送数据到隧道
 		dataMsg := make([]byte, 4+n)
@@ -477,6 +532,7 @@ func (s *Server) forwardData(active *ActiveConnection) {
 
 		select {
 		case s.sendChan <- msg:
+			// 数据已发送
 		case <-time.After(5 * time.Second):
 			log.Printf("发送数据超时 (ID=%d)", active.ID)
 			return
@@ -492,9 +548,17 @@ func (s *Server) closeConnection(connID uint32) {
 	active, exists := s.activeConns[connID]
 	if exists {
 		delete(s.activeConns, connID)
-		active.ClientConn.Close()
+		// 确保连接被关闭
+		if active.ClientConn != nil {
+			active.ClientConn.Close()
+		}
 	}
 	s.connMu.Unlock()
+
+	if !exists {
+		// 连接不存在，无需发送关闭消息
+		return
+	}
 
 	// 发送关闭消息
 	closeData := make([]byte, 4)
@@ -509,12 +573,11 @@ func (s *Server) closeConnection(connID uint32) {
 
 	select {
 	case s.sendChan <- msg:
-	default:
-		// 发送队列满，忽略
-	}
-
-	if exists {
 		log.Printf("连接已关闭: ID=%d", connID)
+	case <-time.After(1 * time.Second):
+		log.Printf("发送关闭消息超时: ID=%d", connID)
+	case <-s.ctx.Done():
+		log.Printf("服务器关闭，跳过发送关闭消息: ID=%d", connID)
 	}
 }
 
@@ -667,4 +730,23 @@ func (s *Server) keepAliveLoop(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// GetTrafficStats 获取流量统计信息
+func (s *Server) GetTrafficStats() stats.TrafficStats {
+	return stats.TrafficStats{
+		BytesSent:     atomic.LoadUint64(&s.bytesSent),
+		BytesReceived: atomic.LoadUint64(&s.bytesReceived),
+		LastUpdate:    time.Now().Unix(),
+	}
+}
+
+// addBytesSent 增加发送字节数
+func (s *Server) addBytesSent(bytes uint64) {
+	atomic.AddUint64(&s.bytesSent, bytes)
+}
+
+// addBytesReceived 增加接收字节数
+func (s *Server) addBytesReceived(bytes uint64) {
+	atomic.AddUint64(&s.bytesReceived, bytes)
 }

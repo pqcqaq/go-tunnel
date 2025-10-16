@@ -200,7 +200,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "端口范围过大",
 			config: Config{
-				PortRange:  PortRangeConfig{From: 1, End: 20000},
+				PortRange:  PortRangeConfig{From: 1, End: 40000},
 				Tunnel:     TunnelConfig{Enabled: false, ListenPort: 0},
 				API:        APIConfig{ListenPort: 8080},
 				Database:   DatabaseConfig{Path: "./data/test.db"},

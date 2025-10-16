@@ -260,7 +260,7 @@ func TestHandleCreateMappingInvalidIP(t *testing.T) {
 		// Port:     15000,
 		SourcePort: 15000,
 		TargetPort: 15000,
-		TargetHost: "invalid-ip",
+		TargetHost: "", // 使用空字符串而不是无效域名，避免DNS查询超时
 	}
 	
 	body, _ := json.Marshal(reqBody)

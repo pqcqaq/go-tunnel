@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	_ "net/http/pprof" // 导入pprof用于性能分析
 	"os"
 	"os/signal"
 	"port-forward/server/api"
@@ -64,8 +65,6 @@ func main() {
 			continue
 		}
 
-		log.Printf("恢复端口映射: %d -> %s:%d (tunnel: %v)", mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.UseTunnel)
-		
 		var err error
 		if mapping.UseTunnel {
 			// 隧道模式：检查隧道服务器是否可用
@@ -103,10 +102,30 @@ func main() {
 		}
 	}()
 
+	// // 启动 pprof 调试服务器（用于性能分析和调试）
+	// pprofPort := 6060
+	// go func() {
+	// 	log.Printf("启动 pprof 调试服务器: http://localhost:%d/debug/pprof/", pprofPort)
+	// 	if err := http.ListenAndServe(":6060", nil); err != nil {
+	// 		log.Printf("pprof 服务器启动失败: %v", err)
+	// 	}
+	// }()
+
+	// // 启动 goroutine 监控
+	// go func() {
+	// 	ticker := time.NewTicker(10 * time.Second)
+	// 	defer ticker.Stop()
+	// 	for range ticker.C {
+	// 		numGoroutines := runtime.NumGoroutine()
+	// 		log.Printf("[监控] 当前 Goroutine 数量: %d", numGoroutines)
+	// 	}
+	// }()
+
 	log.Println("===========================================")
 	log.Printf("服务器启动成功!")
 	log.Printf("端口范围: %d-%d", cfg.PortRange.From, cfg.PortRange.End)
 	log.Printf("HTTP API: http://localhost:%d", cfg.API.ListenPort)
+	// log.Printf("调试接口: http://localhost:%d/debug/pprof/", pprofPort)
 	if cfg.Tunnel.Enabled {
 		log.Printf("隧道服务: 端口 %d", cfg.Tunnel.ListenPort)
 	}
