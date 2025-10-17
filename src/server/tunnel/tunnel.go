@@ -183,13 +183,11 @@ func (s *Server) acceptLoop() {
 			}
 		}
 
-		// 只允许一个客户端连接
+		// 只允许一个客户端连接，如果有旧连接则关闭它
 		s.mu.Lock()
 		if s.tunnelConn != nil {
-			log.Printf("拒绝额外的隧道连接: %s", conn.RemoteAddr())
-			conn.Close()
-			s.mu.Unlock()
-			continue
+			log.Printf("关闭旧的隧道连接，接受新连接: %s -> %s", s.tunnelConn.RemoteAddr(), conn.RemoteAddr())
+			s.tunnelConn.Close() // 关闭旧连接，这会让旧的read/write协程退出
 		}
 		s.tunnelConn = conn
 		s.mu.Unlock()
@@ -262,6 +260,24 @@ func (s *Server) handleTunnelWrite(conn net.Conn) {
 		case <-s.ctx.Done():
 			return
 		case msg := <-s.sendChan:
+			// 检查当前连接是否还是活跃的隧道连接
+			s.mu.RLock()
+			activeConn := s.tunnelConn
+			s.mu.RUnlock()
+
+			if activeConn != conn {
+				// 如果这不是活跃连接，尝试重新放入队列（非阻塞）
+				select {
+				case s.sendChan <- msg:
+					// 消息重新入队成功
+				default:
+					// 队列满时丢弃消息，避免阻塞
+					log.Printf("发送队列繁忙，丢弃消息（旧连接写入器）")
+				}
+				// 退出旧的写入器
+				return
+			}
+
 			if err := s.writeTunnelMessage(conn, msg); err != nil {
 				log.Printf("写入隧道消息失败: %v", err)
 				return

@@ -21,7 +21,7 @@ build-server:
 # 编译客户端
 build-client:
 	@echo "编译客户端..."
-	go build -ldflags "-s -w" -o ../bin/client ./client
+	CGO_ENABLED=0 go build -a -ldflags "-s -w -extldflags "-static"" -o ../bin/client ./client
 	@echo "客户端编译完成: bin/client"
 
 # 运行服务器
