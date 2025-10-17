@@ -62,6 +62,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/list", h.handleListMappings)
 	mux.HandleFunc("/api/stats/traffic", h.handleGetTrafficStats)
 	mux.HandleFunc("/api/stats/monitor", h.handleTrafficMonitor)
+	mux.HandleFunc("/admin", h.handleManagement)
 	mux.HandleFunc("/health", h.handleHealth)
 }
 
@@ -339,4 +340,10 @@ func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, html)
+}
+
+// handleManagement 管理页面
+func (h *Handler) handleManagement(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, managementHTML)
 }
