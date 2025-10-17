@@ -162,7 +162,7 @@ func parseFlags() *TestConfig {
 	flag.IntVar(&config.ConnectPort, "connect", 9901, "连接端口")
 	flag.DurationVar(&config.TestDuration, "duration", 10*time.Second, "测试持续时间")
 	flag.IntVar(&config.PacketSize, "size", 1024, "数据包大小(bytes)")
-	flag.IntVar(&config.Concurrent, "concurrent", 1, "并发连接数")
+	flag.IntVar(&config.Concurrent, "concurrent", 4, "并发连接数")
 	flag.StringVar(&config.Mode, "mode", "all", "测试模式: speed, reliability, sizes, all, concurrent, bandwidth, upload, download")
 
 	flag.Parse()
