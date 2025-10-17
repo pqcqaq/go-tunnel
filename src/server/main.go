@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
-	_ "net/http/pprof" // 导入pprof用于性能分析
 	"os"
 	"os/signal"
 	"port-forward/server/api"
@@ -14,7 +12,6 @@ import (
 	"port-forward/server/tunnel"
 	"port-forward/server/utils"
 	"syscall"
-	"time"
 )
 
 func main() {
@@ -146,13 +143,9 @@ func main() {
 	log.Println("\n接收到关闭信号，正在优雅关闭...")
 
 	// 创建关闭上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	// 停止所有转发器
 	log.Println("停止所有端口转发...")
 	fwdManager.StopAll()
 
 	log.Println("服务器已关闭")
-	<-ctx.Done()
 }

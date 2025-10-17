@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"log"
-	_ "net/http/pprof" // 导入pprof用于性能分析
 	"os"
 	"os/signal"
 	"port-forward/client/tunnel"

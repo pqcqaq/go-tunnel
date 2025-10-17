@@ -15,13 +15,13 @@ build: build-server build-client
 # 编译服务器
 build-server:
 	@echo "编译服务器..."
-	go build -o ../bin/server ./server
+	go build -ldflags "-s -w" -o ../bin/server ./server
 	@echo "服务器编译完成: bin/server"
 
 # 编译客户端
 build-client:
 	@echo "编译客户端..."
-	go build -o ../bin/client ./client
+	go build -ldflags "-s -w" -o ../bin/client ./client
 	@echo "客户端编译完成: bin/client"
 
 # 运行服务器
