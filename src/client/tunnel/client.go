@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,7 +39,7 @@ const (
 	
 	// 超时设置
 	ConnectTimeout = 10 * time.Second // 连接超时
-	ReadTimeout    = 30 * time.Second // 读取超时
+	ReadTimeout    = 300 * time.Second // 读取超时，增加到60秒
 	KeepAliveInterval = 15 * time.Second // 心跳间隔
 )
 
@@ -56,6 +58,7 @@ type LocalConnection struct {
 	Conn       net.Conn
 	closeChan  chan struct{}
 	closeOnce  sync.Once
+	Closing    int32  // 原子操作标志，表示连接正在关闭
 }
 
 // Client 内网穿透客户端
@@ -68,8 +71,9 @@ type Client struct {
 	mu         sync.RWMutex
 	
 	// 连接管理
-	connections map[uint32]*LocalConnection
-	connMu      sync.RWMutex
+	connections  map[uint32]*LocalConnection
+	closingConns map[uint32]time.Time          // 正在关闭的连接，避免重复处理
+	connMu       sync.RWMutex
 	
 	// 消息队列
 	sendChan chan *TunnelMessage
@@ -78,13 +82,19 @@ type Client struct {
 // NewClient 创建新的隧道客户端
 func NewClient(serverAddr string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Client{
-		serverAddr:  serverAddr,
-		cancel:      cancel,
-		ctx:         ctx,
-		connections: make(map[uint32]*LocalConnection),
-		sendChan:    make(chan *TunnelMessage, 1000),
+	client := &Client{
+		serverAddr:   serverAddr,
+		cancel:       cancel,
+		ctx:          ctx,
+		connections:  make(map[uint32]*LocalConnection),
+		closingConns: make(map[uint32]time.Time),
+		sendChan:     make(chan *TunnelMessage, 10000), // 增加到10000
 	}
+	
+	// 启动清理器，定期清理过期的关闭连接记录
+	go client.cleanupClosingConns()
+	
+	return client
 }
 
 // Start 启动隧道客户端
@@ -347,6 +357,7 @@ func (c *Client) handleConnectRequest(msg *TunnelMessage) {
 		TargetAddr: targetAddr,
 		Conn:       localConn,
 		closeChan:  make(chan struct{}),
+		Closing:    0, // 显式初始化为未关闭状态
 	}
 
 	c.connMu.Lock()
@@ -374,23 +385,40 @@ func (c *Client) handleDataMessage(msg *TunnelMessage) {
 
 	c.connMu.RLock()
 	connection, exists := c.connections[connID]
+	isClosing := false
+	if _, found := c.closingConns[connID]; found {
+		isClosing = true
+	}
 	c.connMu.RUnlock()
 
 	if !exists {
-		log.Printf("收到未知连接的数据: %d，发送关闭消息", connID)
-		// 连接不存在，发送关闭消息通知对端
-		closeData := make([]byte, 4)
-		binary.BigEndian.PutUint32(closeData, connID)
-		closeMsg := &TunnelMessage{
-			Version: ProtocolVersion,
-			Type:    MsgTypeClose,
-			Length:  4,
-			Data:    closeData,
+		// 检查是否是正在关闭的连接，避免重复发送关闭消息
+		if !isClosing {
+			log.Printf("收到未知连接的数据: %d，发送关闭消息", connID)
+			// 标记为正在关闭，避免重复处理
+			c.connMu.Lock()
+			c.closingConns[connID] = time.Now()
+			c.connMu.Unlock()
+			
+			// 连接不存在，发送关闭消息通知对端
+			closeData := make([]byte, 4)
+			binary.BigEndian.PutUint32(closeData, connID)
+			closeMsg := &TunnelMessage{
+				Version: ProtocolVersion,
+				Type:    MsgTypeClose,
+				Length:  4,
+				Data:    closeData,
+			}
+			select {
+			case c.sendChan <- closeMsg:
+			default:
+			}
 		}
-		select {
-		case c.sendChan <- closeMsg:
-		default:
-		}
+		return
+	}
+
+	// 检查连接是否正在关闭
+	if atomic.LoadInt32(&connection.Closing) == 1 {
 		return
 	}
 
@@ -457,13 +485,21 @@ func (c *Client) forwardData(connection *LocalConnection) {
 		n, err := connection.Conn.Read(buffer)
 		
 		if err != nil {
+			// 检查是否是正在关闭的连接，避免记录无关错误
+			if atomic.LoadInt32(&connection.Closing) == 1 {
+				return // 连接正在关闭，正常退出
+			}
+			
 			// 任何错误都应该终止转发
 			if err == io.EOF {
 				log.Printf("目标连接正常关闭 (ID=%d)", connection.ID)
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				log.Printf("目标连接超时 (ID=%d)", connection.ID)
 			} else {
-				log.Printf("读取目标连接失败 (ID=%d): %v", connection.ID, err)
+				// 只记录非关闭相关的错误
+				if !isConnectionClosed(err) {
+					log.Printf("读取目标连接失败 (ID=%d): %v", connection.ID, err)
+				}
 			}
 			return
 		}
@@ -476,6 +512,11 @@ func (c *Client) forwardData(connection *LocalConnection) {
 
 		// 重置读取超时
 		connection.Conn.SetReadDeadline(time.Time{})
+
+		// 检查连接是否正在关闭
+		if atomic.LoadInt32(&connection.Closing) == 1 {
+			return
+		}
 
 		// 发送数据到隧道
 		dataMsg := make([]byte, 4+n)
@@ -492,8 +533,9 @@ func (c *Client) forwardData(connection *LocalConnection) {
 		select {
 		case c.sendChan <- msg:
 			// 数据已发送
-		case <-time.After(5 * time.Second):
-			log.Printf("发送数据超时 (ID=%d)", connection.ID)
+		case <-time.After(2 * time.Second): // 减少超时时间
+			queueLen := len(c.sendChan)
+			log.Printf("发送数据超时 (ID=%d), 队列长度: %d/10000", connection.ID, queueLen)
 			return
 		case <-c.ctx.Done():
 			return
@@ -508,7 +550,17 @@ func (c *Client) closeConnection(connID uint32) {
 	c.connMu.Lock()
 	connection, exists := c.connections[connID]
 	if exists {
+		// 使用原子操作标记连接正在关闭
+		if !atomic.CompareAndSwapInt32(&connection.Closing, 0, 1) {
+			// 连接已经在关闭中，避免重复处理
+			c.connMu.Unlock()
+			return
+		}
+		
 		delete(c.connections, connID)
+		// 记录关闭时间，避免重复发送关闭消息
+		c.closingConns[connID] = time.Now()
+		
 		connection.closeOnce.Do(func() {
 			close(connection.closeChan)
 		})
@@ -520,8 +572,19 @@ func (c *Client) closeConnection(connID uint32) {
 	c.connMu.Unlock()
 
 	if !exists {
-		// 连接不存在，无需发送关闭消息
-		return
+		// 连接不存在，检查是否已经在关闭列表中
+		c.connMu.RLock()
+		_, isClosing := c.closingConns[connID]
+		c.connMu.RUnlock()
+		
+		if isClosing {
+			return // 已经处理过了
+		}
+		
+		// 标记为正在关闭
+		c.connMu.Lock()
+		c.closingConns[connID] = time.Now()
+		c.connMu.Unlock()
 	}
 
 	// 发送关闭消息
@@ -628,4 +691,60 @@ func (c *Client) drainSendChan() {
 			return
 		}
 	}
+}
+
+// cleanupClosingConns 定期清理过期的关闭连接记录
+func (c *Client) cleanupClosingConns() {
+	ticker := time.NewTicker(30 * time.Second) // 每30秒清理一次
+	defer ticker.Stop()
+
+	const maxClosingRecords = 10000 // 最大保留记录数
+	const maxAge = 2 * time.Minute  // 最大保留时间，从5分钟减少到2分钟
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			c.connMu.Lock()
+			
+			// 按时间清理过期记录
+			for connID, closeTime := range c.closingConns {
+				if now.Sub(closeTime) > maxAge {
+					delete(c.closingConns, connID)
+				}
+			}
+			
+			// 如果记录数量仍然过多，删除最旧的记录
+			if len(c.closingConns) > maxClosingRecords {
+				// 删除一半的最旧记录，避免频繁清理
+				deleteCount := len(c.closingConns) - maxClosingRecords/2
+				deletedCount := 0
+				
+				for connID, closeTime := range c.closingConns {
+					if deletedCount >= deleteCount {
+						break
+					}
+					if closeTime.Before(now.Add(-maxAge/2)) {
+						delete(c.closingConns, connID)
+						deletedCount++
+					}
+				}
+			}
+			
+			c.connMu.Unlock()
+		}
+	}
+}
+
+// isConnectionClosed 检查错误是否是连接关闭相关的
+func isConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "use of closed network connection") ||
+		   strings.Contains(errStr, "connection reset by peer") ||
+		   strings.Contains(errStr, "broken pipe")
 }
