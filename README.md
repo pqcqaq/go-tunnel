@@ -14,6 +14,8 @@
 - ✅ **连接池管理**: 高效的连接池和并发管理
 - ✅ **优雅关闭**: 支持优雅关闭和信号处理
 - ✅ **自动重连**: 客户端支持断线自动重连
+- ✅ **系统服务**: 支持注册为 Windows 服务和 Linux systemd 服务
+- ✅ **自动重启**: 服务崩溃后自动重启，保证高可用性
 - ✅ **生产级代码**: 完善的错误处理、日志记录和性能优化
 
 ## 系统架构
@@ -583,7 +585,80 @@ cd bin
 ./client -help
 ```
 
-### 6. 运行测试
+### 6. 注册为系统服务（生产环境推荐）
+
+#### Windows 服务
+
+```powershell
+# 以管理员身份运行 PowerShell
+
+# 安装 Server 服务
+.\server.exe -reg install
+
+# 安装 Client 服务
+.\client.exe -server your-server.com:9000 -reg install
+
+# 启动服务
+sc start GoTunnelServer
+sc start GoTunnelClient
+
+# 查看服务状态
+sc query GoTunnelServer
+sc query GoTunnelClient
+
+# 停止服务
+sc stop GoTunnelServer
+sc stop GoTunnelClient
+
+# 卸载服务
+.\server.exe -reg uninstall
+.\client.exe -reg uninstall
+```
+
+#### Linux 服务（systemd）
+
+```bash
+# 以 root 身份运行
+
+# 安装 Server 服务
+sudo ./server -reg install
+
+# 安装 Client 服务
+sudo ./client -server your-server.com:9000 -reg install
+
+# 启动服务
+sudo systemctl start GoTunnelServer
+sudo systemctl start GoTunnelClient
+
+# 查看服务状态
+sudo systemctl status GoTunnelServer
+sudo systemctl status GoTunnelClient
+
+# 查看日志
+sudo journalctl -u GoTunnelServer -f
+sudo journalctl -u GoTunnelClient -f
+
+# 停止服务
+sudo systemctl stop GoTunnelServer
+sudo systemctl stop GoTunnelClient
+
+# 卸载服务
+sudo ./server -reg uninstall
+sudo ./client -reg uninstall
+```
+
+#### 服务特性
+
+- ✅ **开机自启**: 系统启动时自动运行
+- ✅ **自动重启**: 服务崩溃后自动重启（Windows: 60秒后，Linux: 10秒后）
+- ✅ **优雅关闭**: 正确处理停止信号，清理资源
+- ✅ **日志管理**: Windows 使用事件查看器，Linux 使用 journalctl
+
+📖 **详细文档**: 
+- [服务注册完整指南](SERVICE_GUIDE.md)
+- [快速开始指南](QUICK_START_SERVICE.md)
+
+### 7. 运行测试
 
 ```bash
 # 运行所有测试
