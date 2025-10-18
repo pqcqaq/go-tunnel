@@ -47,29 +47,26 @@ func (w *windowsServiceWrapper) Execute(args []string, r <-chan svc.ChangeReques
 	log.Println("服务已启动，等待控制命令...")
 
 loop:
-	for {
-		select {
-		case c := <-r:
-			switch c.Cmd {
-			case svc.Interrogate:
-				// 服务状态查询
-				changes <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				// 收到停止命令
-				log.Println("收到停止命令，正在关闭服务...")
-				changes <- svc.Status{State: svc.StopPending}
+	for c := range r {
+		switch c.Cmd {
+		case svc.Interrogate:
+			// 服务状态查询
+			changes <- c.CurrentStatus
+		case svc.Stop, svc.Shutdown:
+			// 收到停止命令
+			log.Println("收到停止命令，正在关闭服务...")
+			changes <- svc.Status{State: svc.StopPending}
 
-				// 停止服务
-				err := w.handler.Stop()
-				if err != nil {
-					log.Printf("停止服务失败: %v", err)
-				}
-
-				// 通知服务已停止
-				break loop
-			default:
-				log.Printf("收到未知控制命令: %v", c.Cmd)
+			// 停止服务
+			err := w.handler.Stop()
+			if err != nil {
+				log.Printf("停止服务失败: %v", err)
 			}
+
+			// 通知服务已停止
+			break loop
+		default:
+			log.Printf("收到未知控制命令: %v", c.Cmd)
 		}
 	}
 
