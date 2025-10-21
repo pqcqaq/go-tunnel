@@ -10,9 +10,9 @@ import (
 // Config 应用配置结构
 type Config struct {
 	// PortRange PortRangeConfig `yaml:"port_range"`
-	Tunnel    TunnelConfig    `yaml:"tunnel"`
-	API       APIConfig       `yaml:"api"`
-	Database  DatabaseConfig  `yaml:"database"`
+	Tunnel   TunnelConfig   `yaml:"tunnel"`
+	API      APIConfig      `yaml:"api"`
+	Database DatabaseConfig `yaml:"database"`
 }
 
 // PortRangeConfig 端口范围配置
@@ -29,7 +29,8 @@ type TunnelConfig struct {
 
 // APIConfig HTTP API 配置
 type APIConfig struct {
-	ListenPort int `yaml:"listen_port"`
+	ListenPort int    `yaml:"listen_port"`
+	APIKey     string `yaml:"api_key"`
 }
 
 // DatabaseConfig 数据库配置
@@ -73,6 +74,9 @@ func (c *Config) Validate() error {
 	}
 	if c.API.ListenPort <= 0 {
 		return fmt.Errorf("API 端口必须大于 0")
+	}
+	if c.API.APIKey == "" {
+		return fmt.Errorf("API 密钥不能为空")
 	}
 	if c.Database.Path == "" {
 		return fmt.Errorf("数据库路径不能为空")

@@ -13,6 +13,7 @@ tunnel:
 # HTTP API 配置
 api:
   listen_port: 8080
+  api_key: "your-secret-api-key-here"
   
 # 数据库配置
 database:

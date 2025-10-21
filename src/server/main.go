@@ -96,7 +96,7 @@ func (s *serverService) Start() error {
 
 	// 创建 HTTP API 处理器
 	log.Println("初始化 HTTP API...")
-	s.apiHandler = api.NewHandler(database, s.fwdManager, s.tunnelServer)
+	s.apiHandler = api.NewHandler(database, s.fwdManager, s.tunnelServer, cfg.API.APIKey)
 
 	// 启动 HTTP API 服务器
 	go func() {

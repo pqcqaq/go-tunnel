@@ -17,19 +17,21 @@ import (
 
 // Handler HTTP API 处理器
 type Handler struct {
-	db             *db.Database
-	forwarderMgr   *forwarder.Manager
-	tunnelServer   *tunnel.Server
+	db           *db.Database
+	forwarderMgr *forwarder.Manager
+	tunnelServer *tunnel.Server
+	apiKey       string
 	// portRangeFrom  int
 	// portRangeEnd   int
 }
 
 // NewHandler 创建新的 API 处理器
-func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server) *Handler {
+func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Server, apiKey string) *Handler {
 	return &Handler{
-		db:            database,
-		forwarderMgr:  fwdMgr,
-		tunnelServer:  ts,
+		db:           database,
+		forwarderMgr: fwdMgr,
+		tunnelServer: ts,
+		apiKey:       apiKey,
 		// portRangeFrom: portFrom,
 		// portRangeEnd:  portEnd,
 	}
@@ -57,13 +59,35 @@ type Response struct {
 
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/mapping/create", h.handleCreateMapping)
-	mux.HandleFunc("/api/mapping/remove", h.handleRemoveMapping)
-	mux.HandleFunc("/api/mapping/list", h.handleListMappings)
-	mux.HandleFunc("/api/stats/traffic", h.handleGetTrafficStats)
-	mux.HandleFunc("/api/stats/monitor", h.handleTrafficMonitor)
-	mux.HandleFunc("/admin", h.handleManagement)
+	mux.HandleFunc("/api/mapping/create", h.authMiddleware(h.handleCreateMapping))
+	mux.HandleFunc("/api/mapping/remove", h.authMiddleware(h.handleRemoveMapping))
+	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
+	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
+	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
+	mux.HandleFunc("/admin", h.authMiddleware(h.handleManagement))
 	mux.HandleFunc("/health", h.handleHealth)
+}
+
+// authMiddleware 认证中间件
+func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 从请求头中获取 API Key
+		apiKey := r.Header.Get("X-API-Key")
+
+		// 如果请求头中没有，尝试从查询参数中获取
+		if apiKey == "" {
+			apiKey = r.URL.Query().Get("api_key")
+		}
+
+		// 验证 API Key
+		if apiKey != h.apiKey {
+			h.writeError(w, http.StatusUnauthorized, "无效的 API 密钥")
+			return
+		}
+
+		// 认证通过，继续处理请求
+		next(w, r)
+	}
 }
 
 // validateHostOrIP 验证主机名或IP地址
@@ -156,7 +180,7 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 		// 直接模式：直接TCP转发
 		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort)
 	}
-	
+
 	if err != nil {
 		// 回滚数据库操作
 		h.db.RemoveMapping(req.SourcePort)
@@ -305,11 +329,11 @@ func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) 
 
 	// 获取所有端口映射的流量统计
 	forwarderStats := h.forwarderMgr.GetAllTrafficStats()
-	
+
 	// 构建响应
 	mappings := make([]stats.PortTrafficStats, 0, len(forwarderStats))
 	var totalSent, totalReceived uint64
-	
+
 	for port, stat := range forwarderStats {
 		mappings = append(mappings, stats.PortTrafficStats{
 			Port:          port,
@@ -320,11 +344,11 @@ func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) 
 		totalSent += stat.BytesSent
 		totalReceived += stat.BytesReceived
 	}
-	
+
 	// 加上隧道的流量
 	totalSent += tunnelStats.BytesSent
 	totalReceived += tunnelStats.BytesReceived
-	
+
 	response := stats.AllTrafficStats{
 		Tunnel:        tunnelStats,
 		Mappings:      mappings,
