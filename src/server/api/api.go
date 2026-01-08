@@ -39,10 +39,11 @@ func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Ser
 
 // CreateMappingRequest 创建映射请求
 type CreateMappingRequest struct {
-	SourcePort int    `json:"source_port"` // 源端口（本地监听端口）
-	TargetPort int    `json:"target_port"` // 目标端口（远程服务端口）
-	TargetHost string `json:"target_host"` // 目标主机（支持IP或域名）
-	UseTunnel  bool   `json:"use_tunnel"`  // 是否使用隧道模式
+	SourcePort     int    `json:"source_port"`               // 源端口（本地监听端口）
+	TargetPort     int    `json:"target_port"`               // 目标端口（远程服务端口）
+	TargetHost     string `json:"target_host"`               // 目标主机（支持IP或域名）
+	UseTunnel      bool   `json:"use_tunnel"`                // 是否使用隧道模式
+	BandwidthLimit *int64 `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
 }
 
 // RemoveMappingRequest 删除映射请求
@@ -168,8 +169,14 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	//BandwidthLimit 合理范围不小于0
+	if req.BandwidthLimit != nil && *req.BandwidthLimit < 0 {
+		h.writeError(w, http.StatusBadRequest, "带宽限制必须大于等于0")
+		return
+	}
+
 	// 添加到数据库
-	if err := h.db.AddMapping(req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel); err != nil {
+	if err := h.db.AddMapping(req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel, req.BandwidthLimit); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "保存映射失败: "+err.Error())
 		return
 	}
@@ -178,10 +185,10 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if req.UseTunnel {
 		// 隧道模式：使用隧道转发
-		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetHost, req.TargetPort, h.tunnelServer)
+		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetHost, req.TargetPort, h.tunnelServer, req.BandwidthLimit)
 	} else {
 		// 直接模式：直接TCP转发
-		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort)
+		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort, req.BandwidthLimit)
 	}
 
 	if err != nil {

@@ -341,8 +341,8 @@ func TestHandleRemoveMapping(t *testing.T) {
 	defer cleanup()
 
 	// 先创建一个映射
-	database.AddMapping(15000, "192.168.1.100", 15000, false)
-	handler.forwarderMgr.Add(15000, "192.168.1.100", 15000)
+	database.AddMapping(15000, "192.168.1.100", 15000, false, nil)
+	handler.forwarderMgr.Add(15000, "192.168.1.100", 15000, nil)
 
 	reqBody := RemoveMappingRequest{
 		Port: 15000,
@@ -391,9 +391,9 @@ func TestHandleListMappings(t *testing.T) {
 	defer cleanup()
 
 	// 添加一些映射
-	database.AddMapping(15000, "192.168.1.100", 15000, false)
-	database.AddMapping(15001, "192.168.1.101", 15001, true)
-	database.AddMapping(15002, "192.168.1.102", 15002, false)
+	database.AddMapping(15000, "192.168.1.100", 15000, false, nil)
+	database.AddMapping(15001, "192.168.1.101", 15001, true, nil)
+	database.AddMapping(15002, "192.168.1.102", 15002, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/mapping/list", nil)
 	addAuthHeader(req)
@@ -582,7 +582,7 @@ func BenchmarkHandleListMappings(b *testing.B) {
 	// 添加一些映射
 	for i := 0; i < 100; i++ {
 		useTunnel := i%2 == 0 // 偶数使用隧道模式
-		database.AddMapping(10000+i, "192.168.1.1", 10000+i, useTunnel)
+		database.AddMapping(10000+i, "192.168.1.1", 10000+i, useTunnel, nil)
 	}
 
 	fwdMgr := forwarder.NewManager()

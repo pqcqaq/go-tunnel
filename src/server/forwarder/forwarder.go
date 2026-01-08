@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // TunnelServer 隧道服务器接口
@@ -30,15 +32,24 @@ type Forwarder struct {
 	wg           sync.WaitGroup
 	tunnelServer TunnelServer
 	useTunnel    bool
-	
+	limit        *int64
+
 	// 流量统计（使用原子操作）
-	bytesSent     uint64 // 发送字节数
-	bytesReceived uint64 // 接收字节数
+	bytesSent     uint64        // 发送字节数
+	bytesReceived uint64        // 接收字节数
+	limiterOut    *rate.Limiter // 限速器（出方向）
+	limiterIn     *rate.Limiter // 限速器（入方向）
 }
 
 // NewForwarder 创建新的端口转发器
-func NewForwarder(sourcePort int, targetHost string, targetPort int) *Forwarder {
+func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int64) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
+	var limiterOut, limiterIn *rate.Limiter
+	if limit != nil {
+		burst := int(*limit) // 容量至少等于速率，不然无法正常突发
+		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
+		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
+	}
 	return &Forwarder{
 		sourcePort: sourcePort,
 		targetPort: targetPort,
@@ -46,12 +57,21 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int) *Forwarder 
 		cancel:     cancel,
 		ctx:        ctx,
 		useTunnel:  false,
+		limit:      limit,
+		limiterOut: limiterOut,
+		limiterIn:  limiterIn,
 	}
 }
 
 // NewTunnelForwarder 创建使用隧道的端口转发器
-func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer) *Forwarder {
+func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
+	var limiterOut, limiterIn *rate.Limiter
+	if limit != nil {
+		burst := int(*limit) // 容量至少等于速率，不然无法正常突发
+		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
+		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
+	}
 	return &Forwarder{
 		sourcePort:   sourcePort,
 		targetPort:   targetPort,
@@ -60,6 +80,9 @@ func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunne
 		useTunnel:    true,
 		cancel:       cancel,
 		ctx:          ctx,
+		limit:        limit,
+		limiterOut:   limiterOut,
+		limiterIn:    limiterIn,
 	}
 }
 
@@ -92,7 +115,7 @@ func (f *Forwarder) acceptLoop() {
 
 		// 设置接受超时，避免阻塞关闭
 		f.listener.(*net.TCPListener).SetDeadline(time.Now().Add(time.Second))
-		
+
 		conn, err := f.listener.Accept()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -110,6 +133,27 @@ func (f *Forwarder) acceptLoop() {
 		f.wg.Add(1)
 		go f.handleConnection(conn)
 	}
+}
+
+type rateLimitedReader struct {
+	r       io.Reader
+	limiter *rate.Limiter
+	ctx     context.Context
+}
+
+func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
+	if rlr.limiter != nil {
+		maxReq := rlr.limiter.Burst()
+		reqSize := len(p)
+		if reqSize > maxReq {
+			reqSize = maxReq // 避免一次申请超过桶容量导致错误
+		}
+		err := rlr.limiter.WaitN(rlr.ctx, reqSize)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return rlr.r.Read(p)
 }
 
 // handleConnection 处理单个连接
@@ -138,7 +182,7 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-	
+
 	// 动态解析域名并连接
 	targetAddr := fmt.Sprintf("%s:%d", f.targetHost, f.targetPort)
 	targetConn, err := dialer.DialContext(f.ctx, "tcp", targetAddr)
@@ -155,7 +199,12 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	// 客户端 -> 目标
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(targetConn, clientConn)
+		reader := &rateLimitedReader{
+			r:       clientConn,
+			limiter: f.limiterOut,
+			ctx:     f.ctx,
+		}
+		n, _ := io.Copy(targetConn, reader)
 		atomic.AddUint64(&f.bytesSent, uint64(n))
 		// 关闭目标连接的写入端，通知对方不会再发送数据
 		if tcpConn, ok := targetConn.(*net.TCPConn); ok {
@@ -166,7 +215,12 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	// 目标 -> 客户端
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(clientConn, targetConn)
+		reader := &rateLimitedReader{
+			r:       targetConn,
+			limiter: f.limiterIn,
+			ctx:     f.ctx,
+		}
+		n, _ := io.Copy(clientConn, reader)
 		atomic.AddUint64(&f.bytesReceived, uint64(n))
 		// 关闭客户端连接的写入端
 		if tcpConn, ok := clientConn.(*net.TCPConn); ok {
@@ -193,7 +247,7 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 // Stop 停止端口转发
 func (f *Forwarder) Stop() error {
 	f.cancel()
-	
+
 	if f.listener != nil {
 		if err := f.listener.Close(); err != nil {
 			log.Printf("关闭监听器失败 (端口 %d): %v", f.sourcePort, err)
@@ -231,7 +285,7 @@ func NewManager() *Manager {
 }
 
 // Add 添加并启动转发器
-func (m *Manager) Add(sourcePort int, targetHost string, targetPort int) error {
+func (m *Manager) Add(sourcePort int, targetHost string, targetPort int, limit *int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -239,7 +293,7 @@ func (m *Manager) Add(sourcePort int, targetHost string, targetPort int) error {
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewForwarder(sourcePort, targetHost, targetPort)
+	forwarder := NewForwarder(sourcePort, targetHost, targetPort, limit)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}
@@ -249,7 +303,7 @@ func (m *Manager) Add(sourcePort int, targetHost string, targetPort int) error {
 }
 
 // AddTunnel 添加使用隧道的转发器
-func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer) error {
+func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -257,7 +311,7 @@ func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, t
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewTunnelForwarder(sourcePort, targetHost, targetPort, tunnelServer)
+	forwarder := NewTunnelForwarder(sourcePort, targetHost, targetPort, tunnelServer, limit)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}
@@ -319,11 +373,11 @@ func (f *Forwarder) GetTrafficStats() stats.TrafficStats {
 func (m *Manager) GetAllTrafficStats() map[int]stats.TrafficStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	statsMap := make(map[int]stats.TrafficStats)
 	for port, forwarder := range m.forwarders {
 		statsMap[port] = forwarder.GetTrafficStats()
 	}
-	
+
 	return statsMap
 }

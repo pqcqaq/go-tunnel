@@ -421,6 +421,15 @@
                         </div>
 
                         <div class="form-group">
+                            <label for="bandwidth-limit">带宽限制 (可选)</label>
+                            <input type="number" id="bandwidth-limit" min="0" placeholder="例如: 1048576 (1MB/s)">
+                            <small style="color: #666; margin-top: 5px; display: block;">
+                                限制此映射的传输速度，单位：字节/秒。留空表示不限制<br>
+                                示例：1048576 = 1MB/s, 10485760 = 10MB/s
+                            </small>
+                        </div>
+
+                        <div class="form-group">
                             <label>连接模式</label>
                             <div class="checkbox-group">
                                 <input type="checkbox" id="use-tunnel">
@@ -617,12 +626,18 @@
         document.getElementById('create-form').addEventListener('submit', async function (e) {
             e.preventDefault();
 
+            const bandwidthLimitValue = document.getElementById('bandwidth-limit').value;
             const formData = {
                 source_port: parseInt(document.getElementById('source-port').value),
                 target_host: document.getElementById('target-host').value,
                 target_port: parseInt(document.getElementById('target-port').value),
                 use_tunnel: document.getElementById('use-tunnel').checked
             };
+            
+            // 如果填写了带宽限制，则添加到请求中
+            if (bandwidthLimitValue && bandwidthLimitValue.trim() !== '') {
+                formData.bandwidth_limit = parseInt(bandwidthLimitValue);
+            }
 
             try {
                 const response = await fetch(getApiUrl('/api/mapping/create'), {

@@ -12,12 +12,13 @@ import (
 
 // Mapping 端口映射结构
 type Mapping struct {
-	ID          int64  `json:"id"`
-	SourcePort  int    `json:"source_port"`
-	TargetHost  string `json:"target_host"` // 支持IP或域名
-	TargetPort  int    `json:"target_port"`
-	UseTunnel   bool   `json:"use_tunnel"`
-	CreatedAt   string `json:"created_at"`
+	ID             int64  `json:"id"`
+	SourcePort     int    `json:"source_port"`
+	TargetHost     string `json:"target_host"` // 支持IP或域名
+	TargetPort     int    `json:"target_port"`
+	UseTunnel      bool   `json:"use_tunnel"`
+	BandwidthLimit *int64 `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
+	CreatedAt      string `json:"created_at"`
 }
 
 // Database 数据库管理器
@@ -64,21 +65,22 @@ func (d *Database) initTables() error {
 		target_host TEXT NOT NULL,
 		target_port INTEGER NOT NULL,
 		use_tunnel BOOLEAN NOT NULL DEFAULT 0,
+		bandwidth_limit INTEGER,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_source_port ON mappings(source_port);
 	`
-	
+
 	_, err := d.db.Exec(query)
 	if err != nil {
 		return fmt.Errorf("初始化数据库表失败: %w", err)
 	}
-	
+
 	// 检查是否需要迁移现有数据
 	if err := d.migrateDatabase(); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -93,22 +95,26 @@ func (d *Database) migrateDatabase() error {
 
 	hasUseTunnel := false
 	hasTargetHost := false
+	hasBandwidthLimit := false
 	for rows.Next() {
 		var cid int
 		var name, dataType string
 		var notNull, hasDefault int
 		var defaultValue interface{}
-		
+
 		err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &hasDefault)
 		if err != nil {
 			return fmt.Errorf("扫描表结构失败: %w", err)
 		}
-		
+
 		if name == "use_tunnel" {
 			hasUseTunnel = true
 		}
 		if name == "target_host" {
 			hasTargetHost = true
+		}
+		if name == "bandwidth_limit" {
+			hasBandwidthLimit = true
 		}
 	}
 
@@ -135,12 +141,12 @@ func (d *Database) migrateDatabase() error {
 			var name, dataType string
 			var notNull, hasDefault int
 			var defaultValue interface{}
-			
+
 			err := rows2.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &hasDefault)
 			if err != nil {
 				return fmt.Errorf("扫描表结构失败: %w", err)
 			}
-			
+
 			if name == "target_ip" {
 				hasTargetIP = true
 				break
@@ -162,20 +168,28 @@ func (d *Database) migrateDatabase() error {
 		}
 	}
 
+	// 如果不存在 bandwidth_limit 列，则添加它
+	if !hasBandwidthLimit {
+		_, err := d.db.Exec("ALTER TABLE mappings ADD COLUMN bandwidth_limit INTEGER")
+		if err != nil {
+			return fmt.Errorf("添加 bandwidth_limit 列失败: %w", err)
+		}
+	}
+
 	return nil
 }
 
-// AddMapping 添加端口映射
-func (d *Database) AddMapping(sourcePort int, targetHost string, targetPort int, useTunnel bool) error {
+// AddMapping 添加带宽限制的端口映射
+func (d *Database) AddMapping(sourcePort int, targetHost string, targetPort int, useTunnel bool, bandwidthLimit *int64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	query := `INSERT INTO mappings (source_port, target_host, target_port, use_tunnel) VALUES (?, ?, ?, ?)`
-	_, err := d.db.Exec(query, sourcePort, targetHost, targetPort, useTunnel)
+	query := `INSERT INTO mappings (source_port, target_host, target_port, use_tunnel, bandwidth_limit) VALUES (?, ?, ?, ?, ?)`
+	_, err := d.db.Exec(query, sourcePort, targetHost, targetPort, useTunnel, bandwidthLimit)
 	if err != nil {
 		return fmt.Errorf("添加端口映射失败: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -189,16 +203,16 @@ func (d *Database) RemoveMapping(sourcePort int) error {
 	if err != nil {
 		return fmt.Errorf("删除端口映射失败: %w", err)
 	}
-	
+
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("获取影响行数失败: %w", err)
 	}
-	
+
 	if rows == 0 {
 		return fmt.Errorf("端口映射不存在")
 	}
-	
+
 	return nil
 }
 
@@ -207,8 +221,8 @@ func (d *Database) GetMapping(sourcePort int) (*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_host, target_port, use_tunnel, created_at FROM mappings WHERE source_port = ?`
-	
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, created_at FROM mappings WHERE source_port = ?`
+
 	var mapping Mapping
 	err := d.db.QueryRow(query, sourcePort).Scan(
 		&mapping.ID,
@@ -216,16 +230,17 @@ func (d *Database) GetMapping(sourcePort int) (*Mapping, error) {
 		&mapping.TargetHost,
 		&mapping.TargetPort,
 		&mapping.UseTunnel,
+		&mapping.BandwidthLimit,
 		&mapping.CreatedAt,
 	)
-	
+
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询端口映射失败: %w", err)
 	}
-	
+
 	return &mapping, nil
 }
 
@@ -234,14 +249,14 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_host, target_port, use_tunnel, created_at FROM mappings ORDER BY source_port`
-	
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, created_at FROM mappings ORDER BY source_port`
+
 	rows, err := d.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("查询所有映射失败: %w", err)
 	}
 	defer rows.Close()
-	
+
 	var mappings []*Mapping
 	for rows.Next() {
 		var mapping Mapping
@@ -251,17 +266,18 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 			&mapping.TargetHost,
 			&mapping.TargetPort,
 			&mapping.UseTunnel,
+			&mapping.BandwidthLimit,
 			&mapping.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("扫描映射记录失败: %w", err)
 		}
 		mappings = append(mappings, &mapping)
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历映射记录失败: %w", err)
 	}
-	
+
 	return mappings, nil
 }
 

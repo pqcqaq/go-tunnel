@@ -18,7 +18,7 @@ func TestDatabase(t *testing.T) {
 	defer db.Close()
 
 	t.Run("添加映射", func(t *testing.T) {
-		err := db.AddMapping(10001, "192.168.1.100", 22, false)
+		err := db.AddMapping(10001, "192.168.1.100", 22, false, nil)
 		if err != nil {
 			t.Errorf("添加映射失败: %v", err)
 		}
@@ -44,7 +44,7 @@ func TestDatabase(t *testing.T) {
 	})
 
 	t.Run("添加重复映射应该失败", func(t *testing.T) {
-		err := db.AddMapping(10001, "192.168.1.101", 22, true)
+		err := db.AddMapping(10001, "192.168.1.101", 22, true, nil)
 		if err == nil {
 			t.Error("添加重复映射应该失败")
 		}
@@ -52,8 +52,8 @@ func TestDatabase(t *testing.T) {
 
 	t.Run("获取所有映射", func(t *testing.T) {
 		// 添加更多映射
-		db.AddMapping(10002, "192.168.1.101", 22, true)
-		db.AddMapping(10003, "192.168.1.102", 22, false)
+		db.AddMapping(10002, "192.168.1.101", 22, true, nil)
+		db.AddMapping(10003, "192.168.1.102", 22, false, nil)
 
 		mappings, err := db.GetAllMappings()
 		if err != nil {
@@ -102,7 +102,7 @@ func TestDatabaseConcurrency(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(port int) {
 			useTunnel := port%2 == 0 // 偶数端口使用隧道模式
-			err := db.AddMapping(10000+port, "192.168.1.100", port, useTunnel)
+			err := db.AddMapping(10000+port, "192.168.1.100", port, useTunnel, nil)
 			if err != nil {
 				t.Logf("添加映射失败 (端口 %d): %v", 10000+port, err)
 			}
