@@ -64,7 +64,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
 	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
 	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
-	mux.HandleFunc("/admin", h.authMiddleware(h.handleManagement))
+	mux.HandleFunc("/admin", h.handleManagement)
 	mux.HandleFunc("/health", h.handleHealth)
 }
 
@@ -73,6 +73,9 @@ func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 从请求头中获取 API Key
 		apiKey := r.Header.Get("X-API-Key")
+		if apiKey == "" {
+			apiKey = r.Header.Get("secret")
+		}
 
 		// 如果请求头中没有，尝试从查询参数中获取
 		if apiKey == "" {
@@ -363,11 +366,11 @@ func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) 
 // handleTrafficMonitor 流量监控页面
 func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, GetTraffticMonitorHTML())
 }
 
 // handleManagement 管理页面
 func (h *Handler) handleManagement(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, managementHTML)
+	fmt.Fprint(w, GetManagementHTML())
 }
