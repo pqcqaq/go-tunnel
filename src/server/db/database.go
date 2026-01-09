@@ -21,6 +21,16 @@ type Mapping struct {
 	CreatedAt      string `json:"created_at"`
 }
 
+// TrafficRecord 流量统计记录
+type TrafficRecord struct {
+	ID            int64  `json:"id"`
+	Port          int    `json:"port"`           // 端口号
+	IsTunnel      bool   `json:"is_tunnel"`      // 是否为隧道整体流量
+	BytesSent     uint64 `json:"bytes_sent"`     // 发送字节数
+	BytesReceived uint64 `json:"bytes_received"` // 接收字节数
+	RecordedAt    string `json:"recorded_at"`    // 记录时间
+}
+
 // Database 数据库管理器
 type Database struct {
 	db *sql.DB
@@ -69,6 +79,18 @@ func (d *Database) initTables() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_source_port ON mappings(source_port);
+	
+	CREATE TABLE IF NOT EXISTS traffic_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		port INTEGER NOT NULL,
+		is_tunnel BOOLEAN NOT NULL DEFAULT 0,
+		bytes_sent INTEGER NOT NULL DEFAULT 0,
+		bytes_received INTEGER NOT NULL DEFAULT 0,
+		recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_port ON traffic_records(port);
+	CREATE INDEX IF NOT EXISTS idx_is_tunnel ON traffic_records(is_tunnel);
+	CREATE INDEX IF NOT EXISTS idx_recorded_at ON traffic_records(recorded_at);
 	`
 
 	_, err := d.db.Exec(query)
@@ -173,6 +195,37 @@ func (d *Database) migrateDatabase() error {
 		_, err := d.db.Exec("ALTER TABLE mappings ADD COLUMN bandwidth_limit INTEGER")
 		if err != nil {
 			return fmt.Errorf("添加 bandwidth_limit 列失败: %w", err)
+		}
+	}
+
+	// 检查 traffic_records 表的 is_tunnel 列
+	rows3, err := d.db.Query("PRAGMA table_info(traffic_records)")
+	if err == nil {
+		defer rows3.Close()
+		hasIsTunnel := false
+		for rows3.Next() {
+			var cid int
+			var name, dataType string
+			var notNull, hasDefault int
+			var defaultValue interface{}
+
+			err := rows3.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &hasDefault)
+			if err != nil {
+				return fmt.Errorf("扫描 traffic_records 表结构失败: %w", err)
+			}
+
+			if name == "is_tunnel" {
+				hasIsTunnel = true
+				break
+			}
+		}
+
+		// 如果不存在 is_tunnel 列，则添加它
+		if !hasIsTunnel {
+			_, err := d.db.Exec("ALTER TABLE traffic_records ADD COLUMN is_tunnel BOOLEAN NOT NULL DEFAULT 0")
+			if err != nil {
+				return fmt.Errorf("添加 is_tunnel 列失败: %w", err)
+			}
 		}
 	}
 
@@ -284,4 +337,91 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 // Close 关闭数据库连接
 func (d *Database) Close() error {
 	return d.db.Close()
+}
+
+// AddTrafficRecord 添加流量统计记录
+func (d *Database) AddTrafficRecord(port int, isTunnel bool, bytesSent, bytesReceived uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `INSERT INTO traffic_records (port, is_tunnel, bytes_sent, bytes_received) VALUES (?, ?, ?, ?)`
+	_, err := d.db.Exec(query, port, isTunnel, bytesSent, bytesReceived)
+	if err != nil {
+		return fmt.Errorf("添加流量记录失败: %w", err)
+	}
+
+	return nil
+}
+
+// CleanOldTrafficRecords 清理旧的流量记录
+func (d *Database) CleanOldTrafficRecords(retentionDays int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	query := `DELETE FROM traffic_records WHERE recorded_at < datetime('now', '-' || ? || ' days')`
+	result, err := d.db.Exec(query, retentionDays)
+	if err != nil {
+		return fmt.Errorf("清理旧流量记录失败: %w", err)
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows > 0 {
+		fmt.Printf("已清理 %d 条旧流量记录（保留 %d 天）\n", rows, retentionDays)
+	}
+
+	return nil
+}
+
+// GetTrafficRecords 获取流量记录
+func (d *Database) GetTrafficRecords(port int, limit int) ([]*TrafficRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if port == -1 {
+		// 获取所有记录
+		query = `SELECT id, port, is_tunnel, bytes_sent, bytes_received, recorded_at 
+				 FROM traffic_records 
+				 ORDER BY recorded_at DESC 
+				 LIMIT ?`
+		rows, err = d.db.Query(query, limit)
+	} else {
+		// 获取指定端口的记录
+		query = `SELECT id, port, is_tunnel, bytes_sent, bytes_received, recorded_at 
+				 FROM traffic_records 
+				 WHERE port = ? 
+				 ORDER BY recorded_at DESC 
+				 LIMIT ?`
+		rows, err = d.db.Query(query, port, limit)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("查询流量记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*TrafficRecord
+	for rows.Next() {
+		var record TrafficRecord
+		if err := rows.Scan(
+			&record.ID,
+			&record.Port,
+			&record.IsTunnel,
+			&record.BytesSent,
+			&record.BytesReceived,
+			&record.RecordedAt,
+		); err != nil {
+			return nil, fmt.Errorf("扫描流量记录失败: %w", err)
+		}
+		records = append(records, &record)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历流量记录失败: %w", err)
+	}
+
+	return records, nil
 }

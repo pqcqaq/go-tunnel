@@ -12,6 +12,7 @@ import (
 	"port-forward/server/config"
 	"port-forward/server/db"
 	"port-forward/server/forwarder"
+	"port-forward/server/recorder"
 	"port-forward/server/tunnel"
 	"port-forward/server/utils"
 	"strings"
@@ -20,13 +21,14 @@ import (
 
 // serverService 服务实例
 type serverService struct {
-	configPath   string
-	cfg          *config.Config
-	database     *db.Database
-	fwdManager   *forwarder.Manager
-	tunnelServer *tunnel.Server
-	apiHandler   *api.Handler
-	sigChan      chan os.Signal
+	configPath    string
+	cfg           *config.Config
+	database      *db.Database
+	fwdManager    *forwarder.Manager
+	tunnelServer  *tunnel.Server
+	apiHandler    *api.Handler
+	statsRecorder *recorder.Recorder
+	sigChan       chan os.Signal
 }
 
 func (s *serverService) Start() error {
@@ -105,11 +107,21 @@ func (s *serverService) Start() error {
 		}
 	}()
 
+	// 启动流量统计记录器（如果启用）
+	if cfg.Stats.Enabled {
+		log.Println("启动流量统计记录器...")
+		s.statsRecorder = recorder.New(database, s.fwdManager, s.tunnelServer, cfg.Stats.RecordInterval, cfg.Stats.RetentionDays)
+		s.statsRecorder.Start()
+	}
+
 	log.Println("===========================================")
 	log.Printf("服务器启动成功!")
 	log.Printf("HTTP API: http://localhost:%d", cfg.API.ListenPort)
 	if cfg.Tunnel.Enabled {
 		log.Printf("隧道服务: 端口 %d", cfg.Tunnel.ListenPort)
+	}
+	if cfg.Stats.Enabled {
+		log.Printf("流量统计: 每 %d 秒记录一次，保留 %d 天", cfg.Stats.RecordInterval, cfg.Stats.RetentionDays)
 	}
 	log.Println("===========================================")
 
@@ -123,6 +135,11 @@ func (s *serverService) Start() error {
 
 func (s *serverService) Stop() error {
 	log.Println("接收到关闭信号，正在优雅关闭...")
+
+	// 停止流量统计记录器
+	if s.statsRecorder != nil {
+		s.statsRecorder.Stop()
+	}
 
 	// 停止所有转发器
 	if s.fwdManager != nil {

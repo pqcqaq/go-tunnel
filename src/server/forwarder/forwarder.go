@@ -187,10 +187,27 @@ func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// countingWriter 带统计的 Writer
+type countingWriter struct {
+	w       io.Writer
+	counter *uint64
+	port    int
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	if n > 0 {
+		atomic.AddUint64(cw.counter, uint64(n))
+	}
+	return n, err
+}
+
 // handleConnection 处理单个连接
 func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	defer f.wg.Done()
 	defer clientConn.Close()
+
+	log.Printf("端口 %d 收到新连接: %s", f.sourcePort, clientConn.RemoteAddr())
 
 	var targetConn net.Conn
 	var err error
@@ -238,8 +255,13 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 			limiter: f.limiterOut,
 			ctx:     f.ctx,
 		}
-		n, _ := io.Copy(targetConn, reader)
-		atomic.AddUint64(&f.bytesSent, uint64(n))
+		writer := &countingWriter{
+			w:       targetConn,
+			counter: &f.bytesSent,
+			port:    f.sourcePort,
+		}
+		n, _ := io.Copy(writer, reader)
+		log.Printf("端口 %d: 客户端->目标传输完成，本次发送 %d 字节 (总发送: %d)", f.sourcePort, n, atomic.LoadUint64(&f.bytesSent))
 		// 关闭目标连接的写入端，通知对方不会再发送数据
 		if tcpConn, ok := targetConn.(*net.TCPConn); ok {
 			tcpConn.CloseWrite()
@@ -254,8 +276,13 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 			limiter: f.limiterIn,
 			ctx:     f.ctx,
 		}
-		n, _ := io.Copy(clientConn, reader)
-		atomic.AddUint64(&f.bytesReceived, uint64(n))
+		writer := &countingWriter{
+			w:       clientConn,
+			counter: &f.bytesReceived,
+			port:    f.sourcePort,
+		}
+		n, _ := io.Copy(writer, reader)
+		log.Printf("端口 %d: 目标->客户端传输完成，本次接收 %d 字节 (总接收: %d)", f.sourcePort, n, atomic.LoadUint64(&f.bytesReceived))
 		// 关闭客户端连接的写入端
 		if tcpConn, ok := clientConn.(*net.TCPConn); ok {
 			tcpConn.CloseWrite()

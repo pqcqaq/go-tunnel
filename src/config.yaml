@@ -18,3 +18,9 @@ api:
 # 数据库配置
 database:
   path: "./data/mappings.db"
+
+# 统计信息记录配置
+stats:
+  enabled: true          # 是否启用统计记录
+  record_interval: 60    # 记录间隔（秒），默认60秒记录一次
+  retention_days: 7      # 数据保留天数，默认保留7天

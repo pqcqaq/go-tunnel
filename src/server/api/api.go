@@ -11,6 +11,7 @@ import (
 	"port-forward/server/stats"
 	"port-forward/server/tunnel"
 	"port-forward/server/utils"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -64,6 +65,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/remove", h.authMiddleware(h.handleRemoveMapping))
 	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
 	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
+	mux.HandleFunc("/api/stats/history", h.authMiddleware(h.handleGetTrafficHistory))
 	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
 	mux.HandleFunc("/admin", h.handleManagement)
 	mux.HandleFunc("/health", h.handleHealth)
@@ -359,6 +361,12 @@ func (h *Handler) handleGetTrafficStats(w http.ResponseWriter, r *http.Request) 
 	totalSent += tunnelStats.BytesSent
 	totalReceived += tunnelStats.BytesReceived
 
+	// mappings 根据端口号排序
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].Port < mappings[j].Port
+	})
+
+	// 构建最终响应
 	response := stats.AllTrafficStats{
 		Tunnel:        tunnelStats,
 		Mappings:      mappings,
@@ -380,4 +388,51 @@ func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleManagement(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, GetManagementHTML())
+}
+
+// handleGetTrafficHistory 获取历史流量统计
+func (h *Handler) handleGetTrafficHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.writeError(w, http.StatusMethodNotAllowed, "只支持 GET 方法")
+		return
+	}
+
+	// 获取查询参数
+	portStr := r.URL.Query().Get("port")
+	limitStr := r.URL.Query().Get("limit")
+
+	port := -1 // -1 表示所有端口
+	if portStr != "" {
+		var err error
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "无效的端口号")
+			return
+		}
+	}
+
+	limit := 100 // 默认返回最近100条
+	if limitStr != "" {
+		var err error
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "无效的limit参数")
+			return
+		}
+		if limit > 1000 {
+			limit = 1000 // 最多返回1000条
+		}
+	}
+
+	// 查询历史记录
+	records, err := h.db.GetTrafficRecords(port, limit)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "查询历史记录失败: "+err.Error())
+		return
+	}
+
+	h.writeSuccess(w, "获取历史流量统计成功", map[string]interface{}{
+		"records": records,
+		"count":   len(records),
+	})
 }

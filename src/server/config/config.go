@@ -13,6 +13,7 @@ type Config struct {
 	Tunnel   TunnelConfig   `yaml:"tunnel"`
 	API      APIConfig      `yaml:"api"`
 	Database DatabaseConfig `yaml:"database"`
+	Stats    StatsConfig    `yaml:"stats"`
 }
 
 // PortRangeConfig 端口范围配置
@@ -36,6 +37,13 @@ type APIConfig struct {
 // DatabaseConfig 数据库配置
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
+}
+
+// StatsConfig 统计记录配置
+type StatsConfig struct {
+	Enabled        bool `yaml:"enabled"`         // 是否启用统计记录
+	RecordInterval int  `yaml:"record_interval"` // 记录间隔（秒）
+	RetentionDays  int  `yaml:"retention_days"`  // 数据保留天数
 }
 
 // Load 从文件加载配置
