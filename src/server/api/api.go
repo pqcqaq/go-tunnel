@@ -61,13 +61,19 @@ type Response struct {
 
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	// API 路由
 	mux.HandleFunc("/api/mapping/create", h.authMiddleware(h.handleCreateMapping))
 	mux.HandleFunc("/api/mapping/remove", h.authMiddleware(h.handleRemoveMapping))
 	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
 	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
 	mux.HandleFunc("/api/stats/history", h.authMiddleware(h.handleGetTrafficHistory))
 	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
-	mux.HandleFunc("/admin", h.handleManagement)
+	mux.HandleFunc("/api/stats/connections", h.authMiddleware(h.handleGetActiveConnections))
+
+	// 页面路由
+	mux.HandleFunc("/", h.handleRoot)
+	mux.HandleFunc("/login", h.handleLogin)
+	mux.HandleFunc("/dashboard", h.handleDashboard)
 	mux.HandleFunc("/health", h.handleHealth)
 }
 
@@ -384,10 +390,31 @@ func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, GetTraffticMonitorHTML())
 }
 
-// handleManagement 管理页面
-func (h *Handler) handleManagement(w http.ResponseWriter, r *http.Request) {
+// handleConnections 连接监控页面
+func (h *Handler) handleConnections(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, GetManagementHTML())
+	fmt.Fprint(w, GetConnectionsHTML())
+}
+
+// handleRoot 根路径重定向
+func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+// handleLogin 登录页面
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, GetLoginHTML())
+}
+
+// handleDashboard 仪表板页面
+func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, GetDashboardHTML())
 }
 
 // handleGetTrafficHistory 获取历史流量统计
@@ -435,4 +462,28 @@ func (h *Handler) handleGetTrafficHistory(w http.ResponseWriter, r *http.Request
 		"records": records,
 		"count":   len(records),
 	})
+}
+
+// handleGetActiveConnections 获取所有活跃连接信息
+func (h *Handler) handleGetActiveConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.writeError(w, http.StatusMethodNotAllowed, "只支持 GET 方法")
+		return
+	}
+
+	// 获取所有活跃连接
+	connectionsStats := h.forwarderMgr.GetAllActiveConnections()
+
+	// 按端口号排序
+	sort.Slice(connectionsStats, func(i, j int) bool {
+		return connectionsStats[i].SourcePort < connectionsStats[j].SourcePort
+	})
+
+	// 构建响应
+	response := stats.AllConnectionsStats{
+		Mappings:  connectionsStats,
+		Timestamp: time.Now().Unix(),
+	}
+
+	h.writeSuccess(w, "获取活跃连接成功", response)
 }

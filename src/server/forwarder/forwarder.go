@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/google/uuid"
 )
 
 // TunnelServer 隧道服务器接口
@@ -39,6 +41,19 @@ type Forwarder struct {
 	bytesReceived uint64        // 接收字节数
 	limiterOut    *rate.Limiter // 限速器（出方向）
 	limiterIn     *rate.Limiter // 限速器（入方向）
+
+	// 活跃连接管理
+	connections map[string]*activeConnection // 活跃连接映射
+	connMutex   sync.RWMutex                 // 连接映射锁
+}
+
+// activeConnection 活跃连接信息
+type activeConnection struct {
+	clientAddr    string
+	targetAddr    string
+	bytesSent     uint64
+	bytesReceived uint64
+	connectedAt   int64
 }
 
 // NewForwarder 创建新的端口转发器
@@ -57,15 +72,16 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int6
 		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
 	}
 	return &Forwarder{
-		sourcePort: sourcePort,
-		targetPort: targetPort,
-		targetHost: targetHost,
-		cancel:     cancel,
-		ctx:        ctx,
-		useTunnel:  false,
-		limit:      limit,
-		limiterOut: limiterOut,
-		limiterIn:  limiterIn,
+		sourcePort:  sourcePort,
+		targetPort:  targetPort,
+		targetHost:  targetHost,
+		cancel:      cancel,
+		ctx:         ctx,
+		useTunnel:   false,
+		limit:       limit,
+		limiterOut:  limiterOut,
+		limiterIn:   limiterIn,
+		connections: make(map[string]*activeConnection),
 	}
 }
 
@@ -95,6 +111,7 @@ func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunne
 		limit:        limit,
 		limiterOut:   limiterOut,
 		limiterIn:    limiterIn,
+		connections:  make(map[string]*activeConnection),
 	}
 }
 
@@ -189,15 +206,19 @@ func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
 
 // countingWriter 带统计的 Writer
 type countingWriter struct {
-	w       io.Writer
-	counter *uint64
-	port    int
+	w           io.Writer
+	counter     *uint64
+	port        int
+	connCounter *uint64 // 连接级别的计数器
 }
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	if n > 0 {
 		atomic.AddUint64(cw.counter, uint64(n))
+		if cw.connCounter != nil {
+			atomic.AddUint64(cw.connCounter, uint64(n))
+		}
 	}
 	return n, err
 }
@@ -207,7 +228,11 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	defer f.wg.Done()
 	defer clientConn.Close()
 
-	log.Printf("端口 %d 收到新连接: %s", f.sourcePort, clientConn.RemoteAddr())
+	// 生成连接ID
+	connID := uuid.New().String()
+	clientAddr := clientConn.RemoteAddr().String()
+
+	log.Printf("端口 %d 收到新连接: %s (连接ID: %s)", f.sourcePort, clientAddr, connID)
 
 	var targetConn net.Conn
 	var err error
@@ -243,6 +268,30 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 
 	defer targetConn.Close()
 
+	// 记录活跃连接
+	targetAddr := fmt.Sprintf("%s:%d", f.targetHost, f.targetPort)
+	conn := &activeConnection{
+		clientAddr:    clientAddr,
+		targetAddr:    targetAddr,
+		bytesSent:     0,
+		bytesReceived: 0,
+		connectedAt:   time.Now().Unix(),
+	}
+	f.connMutex.Lock()
+	f.connections[connID] = conn
+	f.connMutex.Unlock()
+
+	// 连接关闭时移除记录
+	defer func() {
+		f.connMutex.Lock()
+		delete(f.connections, connID)
+		f.connMutex.Unlock()
+		log.Printf("端口 %d 连接关闭: %s (连接ID: %s, 发送: %d, 接收: %d)",
+			f.sourcePort, clientAddr, connID,
+			atomic.LoadUint64(&conn.bytesSent),
+			atomic.LoadUint64(&conn.bytesReceived))
+	}()
+
 	// 双向转发
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -256,9 +305,10 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 			ctx:     f.ctx,
 		}
 		writer := &countingWriter{
-			w:       targetConn,
-			counter: &f.bytesSent,
-			port:    f.sourcePort,
+			w:           targetConn,
+			counter:     &f.bytesSent,
+			port:        f.sourcePort,
+			connCounter: &conn.bytesSent,
 		}
 		n, _ := io.Copy(writer, reader)
 		log.Printf("端口 %d: 客户端->目标传输完成，本次发送 %d 字节 (总发送: %d)", f.sourcePort, n, atomic.LoadUint64(&f.bytesSent))
@@ -277,9 +327,10 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 			ctx:     f.ctx,
 		}
 		writer := &countingWriter{
-			w:       clientConn,
-			counter: &f.bytesReceived,
-			port:    f.sourcePort,
+			w:           clientConn,
+			counter:     &f.bytesReceived,
+			port:        f.sourcePort,
+			connCounter: &conn.bytesReceived,
 		}
 		n, _ := io.Copy(writer, reader)
 		log.Printf("端口 %d: 目标->客户端传输完成，本次接收 %d 字节 (总接收: %d)", f.sourcePort, n, atomic.LoadUint64(&f.bytesReceived))
@@ -441,4 +492,44 @@ func (m *Manager) GetAllTrafficStats() map[int]stats.TrafficStats {
 	}
 
 	return statsMap
+}
+
+// GetActiveConnections 获取某个转发器的活跃连接信息
+func (f *Forwarder) GetActiveConnections() []stats.ConnectionInfo {
+	f.connMutex.RLock()
+	defer f.connMutex.RUnlock()
+
+	connections := make([]stats.ConnectionInfo, 0, len(f.connections))
+	for _, conn := range f.connections {
+		connections = append(connections, stats.ConnectionInfo{
+			ClientAddr:    conn.clientAddr,
+			TargetAddr:    conn.targetAddr,
+			BytesSent:     atomic.LoadUint64(&conn.bytesSent),
+			BytesReceived: atomic.LoadUint64(&conn.bytesReceived),
+			ConnectedAt:   conn.connectedAt,
+		})
+	}
+
+	return connections
+}
+
+// GetAllActiveConnections 获取所有转发器的活跃连接信息
+func (m *Manager) GetAllActiveConnections() []stats.PortConnectionStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	allStats := make([]stats.PortConnectionStats, 0, len(m.forwarders))
+	for port, forwarder := range m.forwarders {
+		connections := forwarder.GetActiveConnections()
+		allStats = append(allStats, stats.PortConnectionStats{
+			SourcePort:        port,
+			TargetHost:        forwarder.targetHost,
+			TargetPort:        forwarder.targetPort,
+			UseTunnel:         forwarder.useTunnel,
+			ActiveConnections: connections,
+			TotalConnections:  len(connections),
+		})
+	}
+
+	return allStats
 }
