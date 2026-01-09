@@ -492,6 +492,22 @@
         let currentMappings = [];
         let apiKey = '';
 
+        // 格式化带宽限制为可读格式
+        function formatBandwidth(bytes) {
+            if (!bytes || bytes === 0) {
+                return '无限制';
+            }
+            if (bytes < 1024) {
+                return bytes + ' B/s';
+            } else if (bytes < 1024 * 1024) {
+                return (bytes / 1024).toFixed(2) + ' KB/s';
+            } else if (bytes < 1024 * 1024 * 1024) {
+                return (bytes / (1024 * 1024)).toFixed(2) + ' MB/s';
+            } else {
+                return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB/s';
+            }
+        }
+
         // 检查是否已有 API Key
         function checkAuth() {
             const savedKey = sessionStorage.getItem('apiKey');
@@ -733,6 +749,7 @@
                 '<span class="status-badge ' + (mapping.use_tunnel ? 'status-tunnel' : 'status-direct') + '">' +
                 (mapping.use_tunnel ? '隧道模式' : '直连模式') +
                 '</span><br>' +
+                '<strong>带宽限制:</strong> ' + formatBandwidth(mapping.bandwidth_limit) + '<br>' +
                 '<strong>创建时间:</strong> ' + new Date(mapping.created_at).toLocaleString('zh-CN') +
                 '</div>' +
                 '</div>' +
@@ -800,7 +817,8 @@
                 '<strong>目标:</strong> ' + mapping.target_host + ':' + mapping.target_port + ' | ' +
                 '<span class="status-badge ' + (mapping.use_tunnel ? 'status-tunnel' : 'status-direct') + '">' +
                 (mapping.use_tunnel ? '隧道' : '直连') +
-                '</span>' +
+                '</span> | ' +
+                '<strong>带宽:</strong> ' + formatBandwidth(mapping.bandwidth_limit) +
                 '</div>' +
                 '</div>' +
                 '</div>'

@@ -39,10 +39,10 @@ type mockTunnelServer struct {
 	connected bool
 }
 
-func (m *mockTunnelServer) ForwardConnection(clientConn net.Conn, targetIp string, targetPort int) error {
+func (m *mockTunnelServer) ForwardConnection(clientConn net.Conn, targetIp string, targetPort int) (net.Conn, error) {
 	// 简单的模拟实现
 	defer clientConn.Close()
-	return nil
+	return nil, nil
 }
 
 func (m *mockTunnelServer) IsConnected() bool {

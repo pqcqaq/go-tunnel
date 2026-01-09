@@ -16,7 +16,7 @@ import (
 
 // TunnelServer 隧道服务器接口
 type TunnelServer interface {
-	ForwardConnection(clientConn net.Conn, targetIP string, targetPort int) error
+	ForwardConnection(clientConn net.Conn, targetIP string, targetPort int) (net.Conn, error)
 	IsConnected() bool
 	GetTrafficStats() stats.TrafficStats
 }
@@ -46,7 +46,13 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int6
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
 	if limit != nil {
-		burst := int(*limit) // 容量至少等于速率，不然无法正常突发
+		// burst设置为1秒的流量，这样可以平滑处理突发
+		// 同时不会一次性消耗太多令牌
+		burst := int(*limit) / 100
+		if burst < 10240 {
+			burst = 10240 // 最小burst为10KB
+		}
+		log.Printf("设置限速: %d bytes/sec, burst: %d bytes", *limit, burst)
 		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
 		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
 	}
@@ -68,7 +74,13 @@ func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunne
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
 	if limit != nil {
-		burst := int(*limit) // 容量至少等于速率，不然无法正常突发
+		// burst设置为1秒的流量，这样可以平滑处理突发
+		// 同时不会一次性消耗太多令牌
+		burst := int(*limit) / 100
+		if burst < 10240 {
+			burst = 10240 // 最小burst为10KB
+		}
+		log.Printf("设置限速: %d bytes/sec, burst: %d bytes", *limit, burst)
 		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
 		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
 	}
@@ -142,54 +154,76 @@ type rateLimitedReader struct {
 }
 
 func (rlr *rateLimitedReader) Read(p []byte) (int, error) {
-	if rlr.limiter != nil {
-		maxReq := rlr.limiter.Burst()
-		reqSize := len(p)
-		if reqSize > maxReq {
-			reqSize = maxReq // 避免一次申请超过桶容量导致错误
-		}
-		err := rlr.limiter.WaitN(rlr.ctx, reqSize)
-		if err != nil {
-			return 0, err
-		}
+	if rlr.limiter == nil {
+		return rlr.r.Read(p)
 	}
-	return rlr.r.Read(p)
+
+	// 使用更小的块大小以实现更平滑的限流
+	// 2KB是一个合理的值，既不会太频繁调用，也能保持流量平滑
+	chunkSize := 2048
+
+	// 不超过缓冲区大小
+	if len(p) < chunkSize {
+		chunkSize = len(p)
+	}
+
+	// 预先申请令牌
+	if err := rlr.limiter.WaitN(rlr.ctx, chunkSize); err != nil {
+		return 0, err
+	}
+
+	// 限制实际读取大小
+	if len(p) > chunkSize {
+		p = p[:chunkSize]
+	}
+
+	// 执行读取
+	n, err := rlr.r.Read(p)
+
+	// 如果实际读取少于申请的令牌，归还多余的令牌
+	// 注意：rate.Limiter 不支持归还令牌，所以这里只能接受这个损耗
+	// 或者改用先读后限的方式
+
+	return n, err
 }
 
 // handleConnection 处理单个连接
 func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	defer f.wg.Done()
+	defer clientConn.Close()
+
+	var targetConn net.Conn
+	var err error
 
 	if f.useTunnel {
-		// 使用隧道转发
+		// 使用隧道转发，获取 TunnelConn
 		if f.tunnelServer == nil || !f.tunnelServer.IsConnected() {
 			log.Printf("隧道服务器不可用 (端口 %d)", f.sourcePort)
-			clientConn.Close()
 			return
 		}
 
-		// 将连接转发到隧道，ForwardConnection 会处理连接关闭
-		if err := f.tunnelServer.ForwardConnection(clientConn, f.targetHost, f.targetPort); err != nil {
+		// 获取隧道连接
+		targetConn, err = f.tunnelServer.ForwardConnection(clientConn, f.targetHost, f.targetPort)
+		if err != nil {
 			log.Printf("隧道转发失败 (端口 %d -> %s:%d): %v", f.sourcePort, f.targetHost, f.targetPort, err)
+			return
 		}
-		return
+	} else {
+		// 直接连接目标
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
+		// 动态解析域名并连接
+		targetAddr := fmt.Sprintf("%s:%d", f.targetHost, f.targetPort)
+		targetConn, err = dialer.DialContext(f.ctx, "tcp", targetAddr)
+		if err != nil {
+			log.Printf("连接目标失败 (端口 %d -> %s): %v", f.sourcePort, targetAddr, err)
+			return
+		}
 	}
 
-	// 直接连接目标
-	defer clientConn.Close()
-
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	// 动态解析域名并连接
-	targetAddr := fmt.Sprintf("%s:%d", f.targetHost, f.targetPort)
-	targetConn, err := dialer.DialContext(f.ctx, "tcp", targetAddr)
-	if err != nil {
-		log.Printf("连接目标失败 (端口 %d -> %s): %v", f.sourcePort, targetAddr, err)
-		return
-	}
 	defer targetConn.Close()
 
 	// 双向转发

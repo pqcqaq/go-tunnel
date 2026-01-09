@@ -20,28 +20,28 @@ import (
 const (
 	// 协议版本
 	ProtocolVersion = 0x01
-	
+
 	// 消息头大小
 	HeaderSize = 6 // 版本(1) + 类型(1) + 长度(4)
-	
+
 	// 最大包大小 (1MB)
 	MaxPacketSize = 1024 * 1024
-	
+
 	// 消息类型
 	MsgTypeConnectRequest  = 0x01 // 连接请求
 	MsgTypeConnectResponse = 0x02 // 连接响应
-	MsgTypeData           = 0x03 // 数据传输
-	MsgTypeClose          = 0x04 // 关闭连接
-	MsgTypeKeepAlive      = 0x05 // 心跳
-	
+	MsgTypeData            = 0x03 // 数据传输
+	MsgTypeClose           = 0x04 // 关闭连接
+	MsgTypeKeepAlive       = 0x05 // 心跳
+
 	// 连接响应状态
 	ConnStatusSuccess = 0x00 // 连接成功
 	ConnStatusFailed  = 0x01 // 连接失败
-	
+
 	// 超时设置
-	ConnectTimeout = 10 * time.Second // 连接超时
-	ReadTimeout    = 300 * time.Second // 读取超时，统一为60秒
-	KeepAliveInterval = 15 * time.Second // 心跳间隔
+	ConnectTimeout    = 10 * time.Second  // 连接超时
+	ReadTimeout       = 300 * time.Second // 读取超时，统一为60秒
+	KeepAliveInterval = 15 * time.Second  // 心跳间隔
 )
 
 // TunnelMessage 隧道消息
@@ -94,7 +94,115 @@ type ActiveConnection struct {
 	TargetHost string // 支持IP或域名
 	TargetIP   string
 	Created    time.Time
-	Closing    int32  // 原子操作标志，表示连接正在关闭
+	Closing    int32       // 原子操作标志，表示连接正在关闭
+	RecvChan   chan []byte // 接收数据的通道
+}
+
+// TunnelConn 实现 net.Conn 接口的隧道连接
+type TunnelConn struct {
+	server     *Server
+	connID     uint32
+	targetHost string
+	targetPort int
+	recvChan   chan []byte // 接收数据的通道
+	readBuffer []byte      // 读取缓冲区
+	closed     int32       // 原子操作标志，表示连接已关闭
+	closeOnce  sync.Once   // 确保只关闭一次
+}
+
+// Read 实现 net.Conn 接口
+func (tc *TunnelConn) Read(b []byte) (n int, err error) {
+	if atomic.LoadInt32(&tc.closed) == 1 {
+		return 0, io.EOF
+	}
+
+	// 如果有缓冲数据，先返回缓冲数据
+	if len(tc.readBuffer) > 0 {
+		n = copy(b, tc.readBuffer)
+		tc.readBuffer = tc.readBuffer[n:]
+		return n, nil
+	}
+
+	// 从通道读取数据
+	select {
+	case data, ok := <-tc.recvChan:
+		if !ok {
+			return 0, io.EOF
+		}
+		n = copy(b, data)
+		// 如果数据太多，保存剩余部分到缓冲区
+		if n < len(data) {
+			tc.readBuffer = data[n:]
+		}
+		return n, nil
+	case <-tc.server.ctx.Done():
+		return 0, io.EOF
+	}
+}
+
+// Write 实现 net.Conn 接口
+func (tc *TunnelConn) Write(b []byte) (n int, err error) {
+	if atomic.LoadInt32(&tc.closed) == 1 {
+		return 0, fmt.Errorf("connection closed")
+	}
+
+	// 发送数据到隧道
+	dataMsg := make([]byte, 4+len(b))
+	binary.BigEndian.PutUint32(dataMsg[0:4], tc.connID)
+	copy(dataMsg[4:], b)
+
+	msg := &TunnelMessage{
+		Version: ProtocolVersion,
+		Type:    MsgTypeData,
+		Length:  uint32(len(dataMsg)),
+		Data:    dataMsg,
+	}
+
+	select {
+	case tc.server.sendChan <- msg:
+		return len(b), nil
+	case <-time.After(2 * time.Second):
+		return 0, fmt.Errorf("write timeout")
+	case <-tc.server.ctx.Done():
+		return 0, fmt.Errorf("server closed")
+	}
+}
+
+// Close 实现 net.Conn 接口
+func (tc *TunnelConn) Close() error {
+	tc.closeOnce.Do(func() {
+		atomic.StoreInt32(&tc.closed, 1)
+		tc.server.closeConnection(tc.connID)
+	})
+	return nil
+}
+
+// LocalAddr 实现 net.Conn 接口
+func (tc *TunnelConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+// RemoteAddr 实现 net.Conn 接口
+func (tc *TunnelConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP(tc.targetHost), Port: tc.targetPort}
+}
+
+// SetDeadline 实现 net.Conn 接口
+func (tc *TunnelConn) SetDeadline(t time.Time) error {
+	// 隧道连接不支持 deadline，可以根据需要实现
+	return nil
+}
+
+// SetReadDeadline 实现 net.Conn 接口
+func (tc *TunnelConn) SetReadDeadline(t time.Time) error {
+	// 隧道连接不支持 deadline，可以根据需要实现
+	return nil
+}
+
+// SetWriteDeadline 实现 net.Conn 接口
+func (tc *TunnelConn) SetWriteDeadline(t time.Time) error {
+	// 隧道连接不支持 deadline，可以根据需要实现
+	return nil
 }
 
 // Server 内网穿透服务器
@@ -106,17 +214,17 @@ type Server struct {
 	ctx        context.Context
 	wg         sync.WaitGroup
 	mu         sync.RWMutex
-	
+
 	// 连接管理
 	pendingConns map[uint32]*PendingConnection // 待确认连接
 	activeConns  map[uint32]*ActiveConnection  // 活跃连接
 	closingConns map[uint32]time.Time          // 正在关闭的连接，避免重复处理
 	connMu       sync.RWMutex
 	nextConnID   uint32
-	
+
 	// 消息队列
 	sendChan chan *TunnelMessage
-	
+
 	// 流量统计（使用原子操作）
 	bytesSent     uint64 // 通过隧道发送的总字节数
 	bytesReceived uint64 // 通过隧道接收的总字节数
@@ -134,10 +242,10 @@ func NewServer(listenPort int) *Server {
 		closingConns: make(map[uint32]time.Time),
 		sendChan:     make(chan *TunnelMessage, 10000), // 增加到10000
 	}
-	
+
 	// 启动清理器，定期清理过期的关闭连接记录
 	go server.cleanupClosingConns()
-	
+
 	return server
 }
 
@@ -211,7 +319,7 @@ func (s *Server) handleTunnelRead(conn net.Conn) {
 		s.tunnelConn = nil
 		s.mu.Unlock()
 		log.Printf("隧道客户端已断开")
-		
+
 		// 关闭所有活动连接
 		s.connMu.Lock()
 		for _, c := range s.pendingConns {
@@ -293,7 +401,7 @@ func (s *Server) readTunnelMessage(conn net.Conn) (*TunnelMessage, error) {
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return nil, err
 	}
-	
+
 	// 统计接收字节数
 	s.addBytesReceived(uint64(HeaderSize))
 
@@ -333,7 +441,7 @@ func (s *Server) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
 	// 设置写入超时，防止阻塞
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetWriteDeadline(time.Time{}) // 重置超时
-	
+
 	// 构建消息头
 	header := make([]byte, HeaderSize)
 	header[0] = msg.Version
@@ -344,7 +452,7 @@ func (s *Server) writeTunnelMessage(conn net.Conn, msg *TunnelMessage) error {
 	if _, err := conn.Write(header); err != nil {
 		return fmt.Errorf("写入消息头失败: %w", err)
 	}
-	
+
 	// 统计发送字节数
 	s.addBytesSent(uint64(HeaderSize))
 
@@ -398,13 +506,16 @@ func (s *Server) handleConnectResponse(msg *TunnelMessage) {
 	s.connMu.Unlock()
 
 	if status == ConnStatusSuccess {
-		// 连接成功，移到活跃连接
+		// 连接成功，创建接收通道
+		recvChan := make(chan []byte, 100)
+
 		active := &ActiveConnection{
 			ID:         connID,
 			ClientConn: pending.ClientConn,
 			TargetPort: pending.TargetPort,
 			TargetHost: pending.TargetHost,
 			Created:    time.Now(),
+			RecvChan:   recvChan,
 		}
 
 		s.connMu.Lock()
@@ -412,10 +523,6 @@ func (s *Server) handleConnectResponse(msg *TunnelMessage) {
 		s.connMu.Unlock()
 
 		log.Printf("连接已建立: ID=%d, 地址=%s:%d", connID, pending.TargetHost, pending.TargetPort)
-
-		// 启动数据转发
-		s.wg.Add(1)
-		go s.forwardData(active)
 
 		// 通知等待的goroutine
 		select {
@@ -463,7 +570,7 @@ func (s *Server) handleDataMessage(msg *TunnelMessage) {
 			s.connMu.Lock()
 			s.closingConns[connID] = time.Now()
 			s.connMu.Unlock()
-			
+
 			// 连接不存在，发送关闭消息通知对端
 			closeData := make([]byte, 4)
 			binary.BigEndian.PutUint32(closeData, connID)
@@ -486,10 +593,18 @@ func (s *Server) handleDataMessage(msg *TunnelMessage) {
 		return
 	}
 
-	// 写入到客户端连接
-	if _, err := active.ClientConn.Write(data); err != nil {
-		log.Printf("写入客户端连接失败 (ID=%d): %v", connID, err)
+	// 发送数据到接收通道
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	select {
+	case active.RecvChan <- dataCopy:
+		// 数据已发送到接收通道
+	case <-time.After(2 * time.Second):
+		log.Printf("发送数据到接收通道超时 (ID=%d)", connID)
 		s.closeConnection(connID)
+	case <-s.ctx.Done():
+		return
 	}
 }
 
@@ -527,162 +642,26 @@ func (s *Server) handleKeepAlive(msg *TunnelMessage) {
 	}
 }
 
-// forwardData 转发数据
-func (s *Server) forwardData(active *ActiveConnection) {
-	defer s.wg.Done()
-	defer s.closeConnection(active.ID)
-
-	buffer := make([]byte, 32*1024)
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-		}
-
-		// 设置读取超时
-		active.ClientConn.SetReadDeadline(time.Now().Add(ReadTimeout))
-		n, err := active.ClientConn.Read(buffer)
-		
-		if err != nil {
-			// 检查是否是正在关闭的连接，避免记录无关错误
-			if atomic.LoadInt32(&active.Closing) == 1 {
-				return // 连接正在关闭，正常退出
-			}
-			
-			// 任何错误都应该终止转发，包括超时
-			if err == io.EOF {
-				log.Printf("客户端连接正常关闭 (ID=%d)", active.ID)
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				log.Printf("客户端连接超时 (ID=%d)", active.ID)
-			} else {
-				// 只记录非关闭相关的错误
-				if !isConnectionClosed(err) {
-					log.Printf("读取客户端连接失败 (ID=%d): %v", active.ID, err)
-				}
-			}
-			return
-		}
-
-		// 读取到0字节，连接已关闭
-		if n == 0 {
-			log.Printf("客户端连接已关闭 (ID=%d, 读取0字节)", active.ID)
-			return
-		}
-
-		// 重置读取超时
-		active.ClientConn.SetReadDeadline(time.Time{})
-
-		// 检查连接是否正在关闭
-		if atomic.LoadInt32(&active.Closing) == 1 {
-			return
-		}
-
-		// 发送数据到隧道
-		dataMsg := make([]byte, 4+n)
-		binary.BigEndian.PutUint32(dataMsg[0:4], active.ID)
-		copy(dataMsg[4:], buffer[:n])
-
-		msg := &TunnelMessage{
-			Version: ProtocolVersion,
-			Type:    MsgTypeData,
-			Length:  uint32(len(dataMsg)),
-			Data:    dataMsg,
-		}
-
-		select {
-		case s.sendChan <- msg:
-			// 数据已发送
-		case <-time.After(2 * time.Second): // 减少超时时间
-			queueLen := len(s.sendChan)
-			log.Printf("发送数据超时 (ID=%d), 队列长度: %d/10000", active.ID, queueLen)
-			return
-		case <-s.ctx.Done():
-			return
-		}
-	}
-}
-
-// closeConnection 关闭连接
-func (s *Server) closeConnection(connID uint32) {
-	s.connMu.Lock()
-	active, exists := s.activeConns[connID]
-	if exists {
-		// 使用原子操作标记连接正在关闭
-		if !atomic.CompareAndSwapInt32(&active.Closing, 0, 1) {
-			// 连接已经在关闭中，避免重复处理
-			s.connMu.Unlock()
-			return
-		}
-		
-		delete(s.activeConns, connID)
-		// 记录关闭时间，避免重复发送关闭消息
-		s.closingConns[connID] = time.Now()
-		
-		// 确保连接被关闭
-		if active.ClientConn != nil {
-			active.ClientConn.Close()
-		}
-	}
-	s.connMu.Unlock()
-
-	if !exists {
-		// 连接不存在，检查是否已经在关闭列表中
-		s.connMu.RLock()
-		_, isClosing := s.closingConns[connID]
-		s.connMu.RUnlock()
-		
-		if isClosing {
-			return // 已经处理过了
-		}
-		
-		// 标记为正在关闭
-		s.connMu.Lock()
-		s.closingConns[connID] = time.Now()
-		s.connMu.Unlock()
-	}
-
-	// 发送关闭消息
-	closeData := make([]byte, 4)
-	binary.BigEndian.PutUint32(closeData, connID)
-
-	msg := &TunnelMessage{
-		Version: ProtocolVersion,
-		Type:    MsgTypeClose,
-		Length:  4,
-		Data:    closeData,
-	}
-
-	select {
-	case s.sendChan <- msg:
-		log.Printf("连接已关闭: ID=%d", connID)
-	case <-time.After(1 * time.Second):
-		log.Printf("发送关闭消息超时: ID=%d", connID)
-	case <-s.ctx.Done():
-		log.Printf("服务器关闭，跳过发送关闭消息: ID=%d", connID)
-	}
-}
-
-// ForwardConnection 转发连接到隧道（新的透明代理实现）
-func (s *Server) ForwardConnection(clientConn net.Conn, targetHost string, targetPort int) error {
+// ForwardConnection 创建隧道连接（返回 net.Conn 接口）
+func (s *Server) ForwardConnection(clientConn net.Conn, targetHost string, targetPort int) (net.Conn, error) {
 	s.mu.RLock()
 	tunnelConnected := s.tunnelConn != nil
 	s.mu.RUnlock()
 
 	if !tunnelConnected {
-		return fmt.Errorf("隧道连接不可用")
+		return nil, fmt.Errorf("隧道连接不可用")
 	}
 
 	// 创建待处理连接
 	s.connMu.Lock()
 	connID := s.nextConnID
 	s.nextConnID++
-	
+
 	pending := &PendingConnection{
 		ID:           connID,
 		ClientConn:   clientConn,
 		TargetPort:   targetPort,
-		TargetHost:   targetHost, // 现在支持域名
+		TargetHost:   targetHost,
 		Created:      time.Now(),
 		ResponseChan: make(chan bool, 1),
 	}
@@ -711,7 +690,7 @@ func (s *Server) ForwardConnection(clientConn net.Conn, targetHost string, targe
 		s.connMu.Lock()
 		delete(s.pendingConns, connID)
 		s.connMu.Unlock()
-		return fmt.Errorf("发送连接请求超时")
+		return nil, fmt.Errorf("发送连接请求超时")
 	}
 
 	log.Printf("发送连接请求: ID=%d, 地址=%s:%d", connID, targetHost, targetPort)
@@ -720,18 +699,95 @@ func (s *Server) ForwardConnection(clientConn net.Conn, targetHost string, targe
 	select {
 	case success := <-pending.ResponseChan:
 		if success {
-			return nil // 连接建立成功，forwardData会处理后续的数据转发
+			// 连接建立成功，获取活动连接并创建 TunnelConn
+			s.connMu.RLock()
+			active, exists := s.activeConns[connID]
+			s.connMu.RUnlock()
+
+			if !exists {
+				return nil, fmt.Errorf("活动连接不存在")
+			}
+
+			// 创建 TunnelConn
+			tunnelConn := &TunnelConn{
+				server:     s,
+				connID:     connID,
+				targetHost: targetHost,
+				targetPort: targetPort,
+				recvChan:   active.RecvChan,
+			}
+
+			return tunnelConn, nil
 		} else {
-			return fmt.Errorf("远程连接失败")
+			return nil, fmt.Errorf("远程连接失败")
 		}
 	case <-time.After(ConnectTimeout):
 		s.connMu.Lock()
 		delete(s.pendingConns, connID)
 		s.connMu.Unlock()
-		clientConn.Close()
-		return fmt.Errorf("连接超时")
+		return nil, fmt.Errorf("连接超时")
 	case <-s.ctx.Done():
-		return fmt.Errorf("服务器关闭")
+		return nil, fmt.Errorf("服务器关闭")
+	}
+}
+
+// closeConnection 关闭连接
+func (s *Server) closeConnection(connID uint32) {
+	s.connMu.Lock()
+	active, exists := s.activeConns[connID]
+	if exists {
+		// 使用原子操作标记连接正在关闭
+		if !atomic.CompareAndSwapInt32(&active.Closing, 0, 1) {
+			// 连接已经在关闭中，避免重复处理
+			s.connMu.Unlock()
+			return
+		}
+
+		delete(s.activeConns, connID)
+		// 记录关闭时间，避免重复发送关闭消息
+		s.closingConns[connID] = time.Now()
+
+		// 关闭接收通道
+		if active.RecvChan != nil {
+			close(active.RecvChan)
+		}
+	}
+	s.connMu.Unlock()
+
+	if !exists {
+		// 连接不存在，检查是否已经在关闭列表中
+		s.connMu.RLock()
+		_, isClosing := s.closingConns[connID]
+		s.connMu.RUnlock()
+
+		if isClosing {
+			return // 已经处理过了
+		}
+
+		// 标记为正在关闭
+		s.connMu.Lock()
+		s.closingConns[connID] = time.Now()
+		s.connMu.Unlock()
+	}
+
+	// 发送关闭消息
+	closeData := make([]byte, 4)
+	binary.BigEndian.PutUint32(closeData, connID)
+
+	msg := &TunnelMessage{
+		Version: ProtocolVersion,
+		Type:    MsgTypeClose,
+		Length:  4,
+		Data:    closeData,
+	}
+
+	select {
+	case s.sendChan <- msg:
+		log.Printf("连接已关闭: ID=%d", connID)
+	case <-time.After(1 * time.Second):
+		log.Printf("发送关闭消息超时: ID=%d", connID)
+	case <-s.ctx.Done():
+		log.Printf("服务器关闭，跳过发送关闭消息: ID=%d", connID)
 	}
 }
 
@@ -784,7 +840,7 @@ func isTimeout(err error) bool {
 // keepAliveLoop 心跳循环
 func (s *Server) keepAliveLoop(conn net.Conn) {
 	defer s.wg.Done()
-	
+
 	ticker := time.NewTicker(KeepAliveInterval)
 	defer ticker.Stop()
 
@@ -848,31 +904,31 @@ func (s *Server) cleanupClosingConns() {
 		case <-ticker.C:
 			now := time.Now()
 			s.connMu.Lock()
-			
+
 			// 按时间清理过期记录
 			for connID, closeTime := range s.closingConns {
 				if now.Sub(closeTime) > maxAge {
 					delete(s.closingConns, connID)
 				}
 			}
-			
+
 			// 如果记录数量仍然过多，删除最旧的记录
 			if len(s.closingConns) > maxClosingRecords {
 				// 删除一半的最旧记录，避免频繁清理
 				deleteCount := len(s.closingConns) - maxClosingRecords/2
 				deletedCount := 0
-				
+
 				for connID, closeTime := range s.closingConns {
 					if deletedCount >= deleteCount {
 						break
 					}
-					if closeTime.Before(now.Add(-maxAge/2)) {
+					if closeTime.Before(now.Add(-maxAge / 2)) {
 						delete(s.closingConns, connID)
 						deletedCount++
 					}
 				}
 			}
-			
+
 			s.connMu.Unlock()
 		}
 	}
@@ -885,6 +941,6 @@ func isConnectionClosed(err error) bool {
 	}
 	errStr := err.Error()
 	return strings.Contains(errStr, "use of closed network connection") ||
-		   strings.Contains(errStr, "connection reset by peer") ||
-		   strings.Contains(errStr, "broken pipe")
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "broken pipe")
 }
