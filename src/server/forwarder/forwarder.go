@@ -54,7 +54,7 @@ type Forwarder struct {
 }
 
 func (f *Forwarder) UpdateBandwidthLimit(limit *int64) {
-	if limit == nil {
+	if limit == nil || *limit == 0 {
 		f.limiterOut = nil
 		f.limiterIn = nil
 		f.limit = nil
