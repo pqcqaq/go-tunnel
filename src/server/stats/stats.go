@@ -35,12 +35,15 @@ type ConnectionInfo struct {
 
 // PortConnectionStats 端口连接统计
 type PortConnectionStats struct {
-	SourcePort        int              `json:"source_port"`        // 源端口
-	TargetHost        string           `json:"target_host"`        // 目标主机
-	TargetPort        int              `json:"target_port"`        // 目标端口
-	UseTunnel         bool             `json:"use_tunnel"`         // 是否使用隧道
-	ActiveConnections []ConnectionInfo `json:"active_connections"` // 活跃连接列表
-	TotalConnections  int              `json:"total_connections"`  // 总连接数
+	SourcePort        int              `json:"source_port"`               // 源端口
+	TargetHost        string           `json:"target_host"`               // 目标主机
+	TargetPort        int              `json:"target_port"`               // 目标端口
+	UseTunnel         bool             `json:"use_tunnel"`                // 是否使用隧道
+	ActiveConnections []ConnectionInfo `json:"active_connections"`        // 活跃连接列表
+	TotalConnections  int              `json:"total_connections"`         // 总连接数
+	BandwidthLimit    *int64           `json:"bandwidth_limit,omitempty"` // 带宽限制
+	AccessRule        *string          `json:"access_rule,omitempty"`     // 访问控制规则
+	AccessIPs         *string          `json:"access_ips,omitempty"`      // 访问控制IP列表
 }
 
 // AllConnectionsStats 所有连接统计

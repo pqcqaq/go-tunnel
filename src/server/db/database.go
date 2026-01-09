@@ -19,6 +19,9 @@ type Mapping struct {
 	UseTunnel      bool   `json:"use_tunnel"`
 	BandwidthLimit *int64 `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
 	CreatedAt      string `json:"created_at"`
+	// 规则，白名单还是黑名单
+	AccessRule *string `json:"access_rule,omitempty"` // 可选，访问控制规则，JSON格式
+	AccessIPs  *string `json:"access_ips,omitempty"`  // 可选，访问控制的IP列表，JSON格式
 }
 
 // TrafficRecord 流量统计记录
@@ -76,6 +79,8 @@ func (d *Database) initTables() error {
 		target_port INTEGER NOT NULL,
 		use_tunnel BOOLEAN NOT NULL DEFAULT 0,
 		bandwidth_limit INTEGER,
+		access_rule TEXT,
+		access_ips TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_source_port ON mappings(source_port);
@@ -118,6 +123,8 @@ func (d *Database) migrateDatabase() error {
 	hasUseTunnel := false
 	hasTargetHost := false
 	hasBandwidthLimit := false
+	hasAccessRule := false
+	hasAccessIPs := false
 	for rows.Next() {
 		var cid int
 		var name, dataType string
@@ -137,6 +144,12 @@ func (d *Database) migrateDatabase() error {
 		}
 		if name == "bandwidth_limit" {
 			hasBandwidthLimit = true
+		}
+		if name == "access_rule" {
+			hasAccessRule = true
+		}
+		if name == "access_ips" {
+			hasAccessIPs = true
 		}
 	}
 
@@ -198,6 +211,22 @@ func (d *Database) migrateDatabase() error {
 		}
 	}
 
+	// 如果不存在 access_rule 列，则添加它
+	if !hasAccessRule {
+		_, err := d.db.Exec("ALTER TABLE mappings ADD COLUMN access_rule TEXT")
+		if err != nil {
+			return fmt.Errorf("添加 access_rule 列失败: %w", err)
+		}
+	}
+
+	// 如果不存在 access_ips 列，则添加它
+	if !hasAccessIPs {
+		_, err := d.db.Exec("ALTER TABLE mappings ADD COLUMN access_ips TEXT")
+		if err != nil {
+			return fmt.Errorf("添加 access_ips 列失败: %w", err)
+		}
+	}
+
 	// 检查 traffic_records 表的 is_tunnel 列
 	rows3, err := d.db.Query("PRAGMA table_info(traffic_records)")
 	if err == nil {
@@ -233,12 +262,12 @@ func (d *Database) migrateDatabase() error {
 }
 
 // AddMapping 添加带宽限制的端口映射
-func (d *Database) AddMapping(sourcePort int, targetHost string, targetPort int, useTunnel bool, bandwidthLimit *int64) error {
+func (d *Database) AddMapping(sourcePort int, targetHost string, targetPort int, useTunnel bool, bandwidthLimit *int64, accessRule *string, accessIPs *string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	query := `INSERT INTO mappings (source_port, target_host, target_port, use_tunnel, bandwidth_limit) VALUES (?, ?, ?, ?, ?)`
-	_, err := d.db.Exec(query, sourcePort, targetHost, targetPort, useTunnel, bandwidthLimit)
+	query := `INSERT INTO mappings (source_port, target_host, target_port, use_tunnel, bandwidth_limit, access_rule, access_ips) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := d.db.Exec(query, sourcePort, targetHost, targetPort, useTunnel, bandwidthLimit, accessRule, accessIPs)
 	if err != nil {
 		return fmt.Errorf("添加端口映射失败: %w", err)
 	}
@@ -269,12 +298,57 @@ func (d *Database) RemoveMapping(sourcePort int) error {
 	return nil
 }
 
+// UpdateMapping 更新端口映射的访问控制规则
+func (d *Database) UpdateMapping(sourcePort int, limit *int64, accessRule *string, accessIPs *string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// 先把老的查出来，如果是nil的话就赋值上老的
+	selectQuery := `SELECT bandwidth_limit, access_rule, access_ips FROM mappings WHERE source_port = ?`
+	var oldLimit sql.NullInt64
+	var oldAccessRule sql.NullString
+	var oldAccessIPs sql.NullString
+
+	err := d.db.QueryRow(selectQuery, sourcePort).Scan(&oldLimit, &oldAccessRule, &oldAccessIPs)
+	if err != nil {
+		return fmt.Errorf("查询现有映射失败: %w", err)
+	}
+
+	if limit == nil && oldLimit.Valid {
+		limit = &oldLimit.Int64
+	}
+	if accessRule == nil && oldAccessRule.Valid {
+		accessRule = &oldAccessRule.String
+	}
+	if accessIPs == nil && oldAccessIPs.Valid {
+		accessIPs = &oldAccessIPs.String
+	}
+
+	// 然后更新
+	query := `UPDATE mappings SET bandwidth_limit = ?, access_rule = ?, access_ips = ? WHERE source_port = ?`
+	result, err := d.db.Exec(query, limit, accessRule, accessIPs, sourcePort)
+	if err != nil {
+		return fmt.Errorf("更新访问规则失败: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("获取影响行数失败: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("端口映射不存在")
+	}
+
+	return nil
+}
+
 // GetMapping 获取指定端口的映射
 func (d *Database) GetMapping(sourcePort int) (*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, created_at FROM mappings WHERE source_port = ?`
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, access_rule, access_ips, created_at FROM mappings WHERE source_port = ?`
 
 	var mapping Mapping
 	err := d.db.QueryRow(query, sourcePort).Scan(
@@ -284,6 +358,8 @@ func (d *Database) GetMapping(sourcePort int) (*Mapping, error) {
 		&mapping.TargetPort,
 		&mapping.UseTunnel,
 		&mapping.BandwidthLimit,
+		&mapping.AccessRule,
+		&mapping.AccessIPs,
 		&mapping.CreatedAt,
 	)
 
@@ -302,7 +378,7 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, created_at FROM mappings ORDER BY source_port`
+	query := `SELECT id, source_port, target_host, target_port, use_tunnel, bandwidth_limit, access_rule, access_ips, created_at FROM mappings ORDER BY source_port`
 
 	rows, err := d.db.Query(query)
 	if err != nil {
@@ -320,6 +396,8 @@ func (d *Database) GetAllMappings() ([]*Mapping, error) {
 			&mapping.TargetPort,
 			&mapping.UseTunnel,
 			&mapping.BandwidthLimit,
+			&mapping.AccessRule,
+			&mapping.AccessIPs,
 			&mapping.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("扫描映射记录失败: %w", err)

@@ -11,7 +11,7 @@ import (
 
 // TestNewForwarder 测试创建转发器
 func TestNewForwarder(t *testing.T) {
-	fwd := NewForwarder(8080, "192.168.1.100", 80, nil)
+	fwd := NewForwarder(8080, "192.168.1.100", 80, nil, nil, nil)
 
 	if fwd == nil {
 		t.Fatal("创建转发器失败")
@@ -58,7 +58,7 @@ func TestNewTunnelForwarder(t *testing.T) {
 	// 创建模拟隧道服务器
 	mockServer := &mockTunnelServer{connected: true}
 
-	fwd := NewTunnelForwarder(8080, "127.0.0.1", 80, mockServer, nil)
+	fwd := NewTunnelForwarder(8080, "127.0.0.1", 80, mockServer, nil, nil, nil)
 
 	if fwd == nil {
 		t.Fatal("创建隧道转发器失败")
@@ -85,7 +85,7 @@ func TestForwarderStartStop(t *testing.T) {
 	targetPort := targetListener.Addr().(*net.TCPAddr).Port
 
 	// 启动转发器到一个随机端口
-	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil)
+	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil, nil, nil)
 
 	// 创建监听器
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -134,7 +134,7 @@ func TestForwarderConnection(t *testing.T) {
 	}()
 
 	// 创建并启动转发器
-	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil)
+	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil, nil, nil)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -201,7 +201,7 @@ func TestManagerAdd(t *testing.T) {
 	sourcePort := fwdListener.Addr().(*net.TCPAddr).Port
 	fwdListener.Close() // 关闭以便转发器可以使用这个端口
 
-	err = mgr.Add(sourcePort, "127.0.0.1", targetPort, nil)
+	err = mgr.Add(sourcePort, "127.0.0.1", targetPort, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("添加转发器失败: %v", err)
 	}
@@ -228,14 +228,14 @@ func TestManagerAddDuplicate(t *testing.T) {
 	listener.Close()
 
 	// 添加第一个转发器
-	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil)
+	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("添加第一个转发器失败: %v", err)
 	}
 	defer mgr.Remove(sourcePort)
 
 	// 尝试添加重复端口
-	err = mgr.Add(sourcePort, "127.0.0.1", 81, nil)
+	err = mgr.Add(sourcePort, "127.0.0.1", 81, nil, nil, nil)
 	if err == nil {
 		t.Error("应该返回端口已占用错误")
 	}
@@ -254,7 +254,7 @@ func TestManagerRemove(t *testing.T) {
 	listener.Close()
 
 	// 添加转发器
-	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil)
+	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("添加转发器失败: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestManagerExists(t *testing.T) {
 	listener.Close()
 
 	// 添加转发器
-	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil)
+	err = mgr.Add(sourcePort, "127.0.0.1", 80, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("添加转发器失败: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestManagerStopAll(t *testing.T) {
 		port := listener.Addr().(*net.TCPAddr).Port
 		listener.Close()
 
-		err = mgr.Add(port, "127.0.0.1", 80+i, nil)
+		err = mgr.Add(port, "127.0.0.1", 80+i, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("添加转发器 %d 失败: %v", i, err)
 		}
@@ -345,7 +345,7 @@ func TestManagerStopAll(t *testing.T) {
 
 // TestForwarderContextCancellation 测试上下文取消
 func TestForwarderContextCancellation(t *testing.T) {
-	fwd := NewForwarder(0, "127.0.0.1", 80, nil)
+	fwd := NewForwarder(0, "127.0.0.1", 80, nil, nil, nil)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -397,7 +397,7 @@ func BenchmarkForwarderConnection(b *testing.B) {
 	}()
 
 	// 创建转发器
-	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil)
+	fwd := NewForwarder(0, "127.0.0.1", targetPort, nil, nil, nil)
 	listener, _ := net.Listen("tcp", "127.0.0.1:0")
 	fwd.listener = listener
 	fwd.sourcePort = listener.Addr().(*net.TCPAddr).Port
@@ -429,7 +429,7 @@ func BenchmarkManagerOperations(b *testing.B) {
 			port := listener.Addr().(*net.TCPAddr).Port
 			listener.Close()
 
-			mgr.Add(port, "127.0.0.1", 80, nil)
+			mgr.Add(port, "127.0.0.1", 80, nil, nil, nil)
 		}
 	})
 

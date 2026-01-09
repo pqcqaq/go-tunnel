@@ -40,16 +40,26 @@ func NewHandler(database *db.Database, fwdMgr *forwarder.Manager, ts *tunnel.Ser
 
 // CreateMappingRequest 创建映射请求
 type CreateMappingRequest struct {
-	SourcePort     int    `json:"source_port"`               // 源端口（本地监听端口）
-	TargetPort     int    `json:"target_port"`               // 目标端口（远程服务端口）
-	TargetHost     string `json:"target_host"`               // 目标主机（支持IP或域名）
-	UseTunnel      bool   `json:"use_tunnel"`                // 是否使用隧道模式
-	BandwidthLimit *int64 `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
+	SourcePort     int     `json:"source_port"`               // 源端口（本地监听端口）
+	TargetPort     int     `json:"target_port"`               // 目标端口（远程服务端口）
+	TargetHost     string  `json:"target_host"`               // 目标主机（支持IP或域名）
+	UseTunnel      bool    `json:"use_tunnel"`                // 是否使用隧道模式
+	BandwidthLimit *int64  `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
+	AccessRule     *string `json:"access_rule,omitempty"`     // 访问控制规则："whitelist", "blacklist", "disabled"
+	AccessIPs      *string `json:"access_ips,omitempty"`      // IP列表，JSON格式
 }
 
 // RemoveMappingRequest 删除映射请求
 type RemoveMappingRequest struct {
 	Port int `json:"port"`
+}
+
+// UpdateAccessRuleRequest 更新访问规则请求
+type UpdateAccessRuleRequest struct {
+	Port           int     `json:"port"`                      // 端口号
+	BandwidthLimit *int64  `json:"bandwidth_limit,omitempty"` // 带宽限制，字节/秒，可为空
+	AccessRule     *string `json:"access_rule,omitempty"`     // 访问控制规则："whitelist", "blacklist", "disabled"
+	AccessIPs      *string `json:"access_ips,omitempty"`      // IP列表，JSON格式
 }
 
 // Response 统一响应格式
@@ -65,6 +75,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/create", h.authMiddleware(h.handleCreateMapping))
 	mux.HandleFunc("/api/mapping/remove", h.authMiddleware(h.handleRemoveMapping))
 	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
+	mux.HandleFunc("/api/mapping/update", h.authMiddleware(h.handleUpdateMapping))
 	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
 	mux.HandleFunc("/api/stats/history", h.authMiddleware(h.handleGetTrafficHistory))
 	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
@@ -183,8 +194,16 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 验证AccessRule，如果提供则必须是有效值
+	if req.AccessRule != nil {
+		if *req.AccessRule != "whitelist" && *req.AccessRule != "blacklist" && *req.AccessRule != "disabled" {
+			h.writeError(w, http.StatusBadRequest, "访问控制规则必须是 'whitelist', 'blacklist' 或 'disabled'")
+			return
+		}
+	}
+
 	// 添加到数据库
-	if err := h.db.AddMapping(req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel, req.BandwidthLimit); err != nil {
+	if err := h.db.AddMapping(req.SourcePort, req.TargetHost, req.TargetPort, req.UseTunnel, req.BandwidthLimit, req.AccessRule, req.AccessIPs); err != nil {
 		h.writeError(w, http.StatusInternalServerError, "保存映射失败: "+err.Error())
 		return
 	}
@@ -193,10 +212,10 @@ func (h *Handler) handleCreateMapping(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if req.UseTunnel {
 		// 隧道模式：使用隧道转发
-		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetHost, req.TargetPort, h.tunnelServer, req.BandwidthLimit)
+		err = h.forwarderMgr.AddTunnel(req.SourcePort, req.TargetHost, req.TargetPort, h.tunnelServer, req.BandwidthLimit, req.AccessRule, req.AccessIPs)
 	} else {
 		// 直接模式：直接TCP转发
-		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort, req.BandwidthLimit)
+		err = h.forwarderMgr.Add(req.SourcePort, req.TargetHost, req.TargetPort, req.BandwidthLimit, req.AccessRule, req.AccessIPs)
 	}
 
 	if err != nil {
@@ -390,12 +409,6 @@ func (h *Handler) handleTrafficMonitor(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, GetTraffticMonitorHTML())
 }
 
-// handleConnections 连接监控页面
-func (h *Handler) handleConnections(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, GetConnectionsHTML())
-}
-
 // handleRoot 根路径重定向
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -474,6 +487,25 @@ func (h *Handler) handleGetActiveConnections(w http.ResponseWriter, r *http.Requ
 	// 获取所有活跃连接
 	connectionsStats := h.forwarderMgr.GetAllActiveConnections()
 
+	// 获取所有映射的访问规则信息
+	allMappings, err := h.db.GetAllMappings()
+	if err == nil {
+		// 将访问规则信息添加到连接统计中
+		mappingRules := make(map[int]*db.Mapping)
+		for _, m := range allMappings {
+			mappingRules[m.SourcePort] = m
+		}
+
+		// 合并访问规则信息到连接统计
+		for i := range connectionsStats {
+			if mapping, exists := mappingRules[connectionsStats[i].SourcePort]; exists {
+				connectionsStats[i].AccessRule = mapping.AccessRule
+				connectionsStats[i].AccessIPs = mapping.AccessIPs
+				connectionsStats[i].BandwidthLimit = mapping.BandwidthLimit
+			}
+		}
+	}
+
 	// 按端口号排序
 	sort.Slice(connectionsStats, func(i, j int) bool {
 		return connectionsStats[i].SourcePort < connectionsStats[j].SourcePort
@@ -486,4 +518,54 @@ func (h *Handler) handleGetActiveConnections(w http.ResponseWriter, r *http.Requ
 	}
 
 	h.writeSuccess(w, "获取活跃连接成功", response)
+}
+
+// handleUpdateMapping 处理更新访问规则请求
+func (h *Handler) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "只支持 POST 方法")
+		return
+	}
+
+	var req UpdateAccessRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+
+	// 验证AccessRule，如果提供则必须是有效值
+	if req.AccessRule != nil {
+		if *req.AccessRule != "whitelist" && *req.AccessRule != "blacklist" && *req.AccessRule != "disabled" {
+			h.writeError(w, http.StatusBadRequest, "访问控制规则必须是 'whitelist', 'blacklist' 或 'disabled'")
+			return
+		}
+	}
+
+	//BandwidthLimit 合理范围不小于0
+	if req.BandwidthLimit != nil && *req.BandwidthLimit < 0 {
+		h.writeError(w, http.StatusBadRequest, "带宽限制必须大于等于0")
+		return
+	}
+
+	// 更新数据库
+	if err := h.db.UpdateMapping(req.Port, req.BandwidthLimit, req.AccessRule, req.AccessIPs); err != nil {
+		h.writeError(w, http.StatusInternalServerError, "更新访问规则失败: "+err.Error())
+		return
+	}
+
+	log.Printf("更新端口 %d 的映射", req.Port)
+
+	h.writeSuccess(w, "映射更新成功", map[string]interface{}{
+		"port":            req.Port,
+		"access_rule":     req.AccessRule,
+		"access_ips":      req.AccessIPs,
+		"bandwidth_limit": req.BandwidthLimit,
+	})
+
+	// 更新转发器的访问规则和带宽限制
+	fwd := h.forwarderMgr.GetForwarder(req.Port)
+	if fwd != nil {
+		fwd.UpdateAccessControl(req.AccessRule, req.AccessIPs)
+		fwd.UpdateBandwidthLimit(req.BandwidthLimit)
+	}
 }

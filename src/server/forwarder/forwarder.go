@@ -2,11 +2,13 @@ package forwarder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"port-forward/server/stats"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +47,40 @@ type Forwarder struct {
 	// 活跃连接管理
 	connections map[string]*activeConnection // 活跃连接映射
 	connMutex   sync.RWMutex                 // 连接映射锁
+
+	// 访问控制
+	accessRule string   // 访问控制规则: "disabled", "whitelist", "blacklist"
+	accessIPs  []string // IP列表（CIDR或单个IP）
+}
+
+func (f *Forwarder) UpdateBandwidthLimit(limit *int64) {
+	if limit == nil {
+		f.limiterOut = nil
+		f.limiterIn = nil
+		f.limit = nil
+		log.Printf("取消端口 %d 的带宽限制", f.sourcePort)
+		return
+	}
+	f.limit = limit
+	// burst设置为1秒的流量，这样可以平滑处理突发
+	burst := int(*limit) / 100
+	if burst < 10240 {
+		burst = 10240 // 最小burst为10KB
+	}
+	log.Printf("更新端口 %d 的带宽限制: %d bytes/sec, burst: %d bytes", f.sourcePort, *limit, burst)
+	f.limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
+	f.limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
+}
+
+func (f *Forwarder) UpdateAccessControl(rule *string, ps *string) {
+	if rule == nil || *rule == "disabled" {
+		f.accessRule = "disabled"
+		f.accessIPs = nil
+		log.Printf("禁用端口 %d 的访问控制", f.sourcePort)
+		return
+	}
+	f.accessRule = *rule
+	f.accessIPs = parseIPList(ps)
 }
 
 // activeConnection 活跃连接信息
@@ -56,8 +92,77 @@ type activeConnection struct {
 	connectedAt   int64
 }
 
+// parseIPList 解析IP列表JSON字符串为切片
+func parseIPList(ipListJSON *string) []string {
+	if ipListJSON == nil || *ipListJSON == "" {
+		return nil
+	}
+
+	var ips []string
+	if err := json.Unmarshal([]byte(*ipListJSON), &ips); err != nil {
+		log.Printf("解析IP列表失败: %v", err)
+		return nil
+	}
+
+	return ips
+}
+
+// checkIPAllowed 检查IP是否允许访问
+func (f *Forwarder) checkIPAllowed(remoteAddr string) bool {
+	// 如果规则被禁用，允许所有连接
+	if f.accessRule == "" || f.accessRule == "disabled" {
+		return true
+	}
+
+	// 提取IP地址（去除端口）
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		log.Printf("解析远程地址失败: %v", err)
+		return false
+	}
+
+	clientIP := net.ParseIP(host)
+	if clientIP == nil {
+		log.Printf("无效的IP地址: %s", host)
+		return false
+	}
+
+	// 检查IP是否在列表中
+	inList := false
+	for _, ipStr := range f.accessIPs {
+		// 检查是否为CIDR网段
+		if strings.Contains(ipStr, "/") {
+			_, ipNet, err := net.ParseCIDR(ipStr)
+			if err != nil {
+				log.Printf("无效的CIDR: %s", ipStr)
+				continue
+			}
+			if ipNet.Contains(clientIP) {
+				inList = true
+				break
+			}
+		} else {
+			// 单个IP地址
+			ip := net.ParseIP(ipStr)
+			if ip != nil && ip.Equal(clientIP) {
+				inList = true
+				break
+			}
+		}
+	}
+
+	// 根据规则类型返回结果
+	if f.accessRule == "whitelist" {
+		return inList // 白名单：只允许列表中的IP
+	} else if f.accessRule == "blacklist" {
+		return !inList // 黑名单：拒绝列表中的IP
+	}
+
+	return true
+}
+
 // NewForwarder 创建新的端口转发器
-func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int64) *Forwarder {
+func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int64, accessRule *string, accessIPs *string) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
 	if limit != nil {
@@ -71,6 +176,13 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int6
 		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
 		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
 	}
+
+	// 解析访问规则
+	rule := "disabled"
+	if accessRule != nil {
+		rule = *accessRule
+	}
+
 	return &Forwarder{
 		sourcePort:  sourcePort,
 		targetPort:  targetPort,
@@ -82,11 +194,13 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int6
 		limiterOut:  limiterOut,
 		limiterIn:   limiterIn,
 		connections: make(map[string]*activeConnection),
+		accessRule:  rule,
+		accessIPs:   parseIPList(accessIPs),
 	}
 }
 
 // NewTunnelForwarder 创建使用隧道的端口转发器
-func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64) *Forwarder {
+func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64, accessRule *string, accessIPs *string) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
 	if limit != nil {
@@ -100,6 +214,13 @@ func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunne
 		limiterOut = rate.NewLimiter(rate.Limit(*limit), burst)
 		limiterIn = rate.NewLimiter(rate.Limit(*limit), burst)
 	}
+
+	// 解析访问规则
+	rule := "disabled"
+	if accessRule != nil {
+		rule = *accessRule
+	}
+
 	return &Forwarder{
 		sourcePort:   sourcePort,
 		targetPort:   targetPort,
@@ -112,6 +233,8 @@ func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunne
 		limiterOut:   limiterOut,
 		limiterIn:    limiterIn,
 		connections:  make(map[string]*activeConnection),
+		accessRule:   rule,
+		accessIPs:    parseIPList(accessIPs),
 	}
 }
 
@@ -231,6 +354,19 @@ func (f *Forwarder) handleConnection(clientConn net.Conn) {
 	// 生成连接ID
 	connID := uuid.New().String()
 	clientAddr := clientConn.RemoteAddr().String()
+
+	// 检查IP访问控制
+	if !f.checkIPAllowed(clientAddr) {
+		log.Printf("端口 %d 拒绝连接: %s (访问规则: %s, 连接ID: %s)", f.sourcePort, clientAddr, f.accessRule, connID)
+
+		// 白名单模式：返回简单提示（便于调试配置错误）
+		// 黑名单模式：静默拒绝（不暴露信息给恶意访问者）
+		if f.accessRule == "whitelist" {
+			clientConn.Write([]byte("Access denied: IP not in whitelist\n"))
+		}
+
+		return
+	}
 
 	log.Printf("端口 %d 收到新连接: %s (连接ID: %s)", f.sourcePort, clientAddr, connID)
 
@@ -389,6 +525,12 @@ type Manager struct {
 	mu         sync.RWMutex
 }
 
+func (m *Manager) GetForwarder(port int) *Forwarder {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.forwarders[port]
+}
+
 // NewManager 创建新的转发器管理器
 func NewManager() *Manager {
 	return &Manager{
@@ -397,7 +539,7 @@ func NewManager() *Manager {
 }
 
 // Add 添加并启动转发器
-func (m *Manager) Add(sourcePort int, targetHost string, targetPort int, limit *int64) error {
+func (m *Manager) Add(sourcePort int, targetHost string, targetPort int, limit *int64, accessRule *string, accessIPs *string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -405,7 +547,7 @@ func (m *Manager) Add(sourcePort int, targetHost string, targetPort int, limit *
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewForwarder(sourcePort, targetHost, targetPort, limit)
+	forwarder := NewForwarder(sourcePort, targetHost, targetPort, limit, accessRule, accessIPs)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}
@@ -415,7 +557,7 @@ func (m *Manager) Add(sourcePort int, targetHost string, targetPort int, limit *
 }
 
 // AddTunnel 添加使用隧道的转发器
-func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64) error {
+func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64, accessRule *string, accessIPs *string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -423,7 +565,7 @@ func (m *Manager) AddTunnel(sourcePort int, targetHost string, targetPort int, t
 		return fmt.Errorf("端口 %d 已被占用", sourcePort)
 	}
 
-	forwarder := NewTunnelForwarder(sourcePort, targetHost, targetPort, tunnelServer, limit)
+	forwarder := NewTunnelForwarder(sourcePort, targetHost, targetPort, tunnelServer, limit, accessRule, accessIPs)
 	if err := forwarder.Start(); err != nil {
 		return err
 	}

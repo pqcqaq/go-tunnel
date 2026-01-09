@@ -760,6 +760,7 @@
                                     <th>目标端口</th>
                                     <th>模式</th>
                                     <th>带宽限制</th>
+                                    <th>访问规则</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
@@ -774,6 +775,17 @@
                                         </span>
                                     </td>
                                     <td>{{ mapping.bandwidth_limit ? formatBytes(mapping.bandwidth_limit) + '/s' : '无限制' }}</td>
+                                    <td>
+                                        <span v-if="!mapping.access_rule || mapping.access_rule === 'disabled'" class="badge" style="background: #6c757d; color: white;">
+                                            无限制
+                                        </span>
+                                        <span v-else-if="mapping.access_rule === 'whitelist'" class="badge" style="background: #28a745; color: white;">
+                                            🛡️ 白名单
+                                        </span>
+                                        <span v-else-if="mapping.access_rule === 'blacklist'" class="badge" style="background: #dc3545; color: white;">
+                                            🚫 黑名单
+                                        </span>
+                                    </td>
                                     <td>
                                         <button class="btn btn-danger btn-sm" @click="deleteMapping(mapping.source_port)">
                                             删除
@@ -827,6 +839,28 @@
                                     <small class="form-help">单位：字节/秒，例如 1048576 表示 1MB/s</small>
                                 </div>
 
+                                <div class="form-group">
+                                    <label>访问控制规则</label>
+                                    <select v-model="newMapping.accessRule">
+                                        <option value="disabled">禁用（不限制访问）</option>
+                                        <option value="whitelist">白名单（仅允许列表中的IP）</option>
+                                        <option value="blacklist">黑名单（拒绝列表中的IP）</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-group" v-if="newMapping.accessRule !== 'disabled'">
+                                    <label>IP列表</label>
+                                    <textarea 
+                                        v-model="newMapping.accessIPsText" 
+                                        rows="4" 
+                                        placeholder="每行一个IP地址或CIDR网段"
+                                        style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; font-family: monospace; resize: vertical;"
+                                    ></textarea>
+                                    <small class="form-help">
+                                        {{ newMapping.accessRule === 'whitelist' ? '只有这些IP可以连接' : '这些IP将被拒绝连接' }}
+                                    </small>
+                                </div>
+
                                 <div style="display: flex; gap: 10px; margin-top: 25px;">
                                     <button type="submit" class="btn btn-primary" style="flex: 1;">创建</button>
                                     <button type="button" class="btn" style="flex: 1; background: #6c757d; color: white;" @click="showCreateModal = false">取消</button>
@@ -847,7 +881,9 @@
                         targetHost: '',
                         targetPort: '',
                         useTunnel: false,
-                        bandwidthLimit: null
+                        bandwidthLimit: null,
+                        accessRule: 'disabled',
+                        accessIPsText: ''
                     }
                 };
             },
@@ -883,6 +919,20 @@
                         
                         if (this.newMapping.bandwidthLimit) {
                             data.bandwidth_limit = this.newMapping.bandwidthLimit;
+                        }
+
+                        // 添加访问规则
+                        if (this.newMapping.accessRule && this.newMapping.accessRule !== 'disabled') {
+                            data.access_rule = this.newMapping.accessRule;
+                            
+                            // 处理IP列表
+                            if (this.newMapping.accessIPsText) {
+                                const ips = this.newMapping.accessIPsText
+                                    .split('\n')
+                                    .map(ip => ip.trim())
+                                    .filter(ip => ip.length > 0);
+                                data.access_ips = JSON.stringify(ips);
+                            }
                         }
 
                         const response = await axios.post('/api/mapping/create', data, {
@@ -924,7 +974,9 @@
                         targetHost: '',
                         targetPort: '',
                         useTunnel: false,
-                        bandwidthLimit: null
+                        bandwidthLimit: null,
+                        accessRule: 'disabled',
+                        accessIPsText: ''
                     };
                 },
                 formatBytes(bytes) {
@@ -1033,6 +1085,9 @@
                                 </span>
                             </div>
                             <div style="display: flex; gap: 10px; align-items: center;">
+                                <button class="btn btn-sm" @click="showRuleModal(mapping)" style="background: #17a2b8; color: white;">
+                                    {{ getRuleButtonText(mapping) }}
+                                </button>
                                 <div class="badge" style="background: #667eea; color: white; font-size: 1em;">
                                     {{ mapping.total_connections }} 个连接
                                 </div>
@@ -1090,6 +1145,62 @@
                             <p style="color: #999; margin: 0;">暂无活跃连接</p>
                         </div>
                     </div>
+
+                    <!-- 规则管理模态框 -->
+                    <div v-if="showRuleModalFlag" class="modal-overlay" @click.self="closeRuleModal">
+                        <div class="modal">
+                            <div class="modal-header">
+                                <h3 class="modal-title">访问规则管理 - 端口 {{ currentMapping.source_port }}</h3>
+                                <button class="close-btn" @click="closeRuleModal">×</button>
+                            </div>
+
+                            <form @submit.prevent="updateRule">
+                                <div class="form-group">
+                                    <label>访问控制规则</label>
+                                    <select v-model="ruleForm.accessRule" required>
+                                        <option value="disabled">禁用（不限制访问）</option>
+                                        <option value="whitelist">白名单（仅允许列表中的IP）</option>
+                                        <option value="blacklist">黑名单（拒绝列表中的IP）</option>
+                                    </select>
+                                    <small class="form-help">选择访问控制模式</small>
+                                </div>
+
+                                <div class="form-group">
+                                    <label>带宽限制（可选）</label>
+                                    <input 
+                                        type="number" 
+                                        v-model.number="ruleForm.bandwidthLimit" 
+                                        min="0" 
+                                        placeholder="留空表示无限制"
+                                    >
+                                    <small class="form-help">单位：字节/秒，例如 1048576 表示 1MB/s。当前: {{ formatBandwidth(ruleForm.bandwidthLimit) }}</small>
+                                </div>
+
+                                <div class="form-group" v-if="ruleForm.accessRule !== 'disabled'">
+                                    <label>IP列表</label>
+                                    <textarea 
+                                        v-model="ruleForm.accessIPsText" 
+                                        rows="6" 
+                                        placeholder="每行一个IP地址或CIDR网段&#10;例如:&#10;192.168.1.100&#10;10.0.0.0/24&#10;172.16.0.1"
+                                        style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 1em; font-family: monospace; resize: vertical; transition: all 0.3s;"
+                                    ></textarea>
+                                    <small class="form-help">
+                                        {{ ruleForm.accessRule === 'whitelist' ? '只有这些IP可以连接' : '这些IP将被拒绝连接' }}
+                                    </small>
+                                </div>
+
+                                <div v-if="ruleForm.accessRule !== 'disabled' && ruleForm.accessIPsText" 
+                                     style="margin-bottom: 20px; padding: 12px; background: #f0f9ff; border-radius: 8px; border-left: 4px solid #17a2b8;">
+                                    <strong>当前IP数量:</strong> {{ getIPCount() }}
+                                </div>
+
+                                <div style="display: flex; gap: 10px; margin-top: 25px;">
+                                    <button type="submit" class="btn btn-primary" style="flex: 1;">保存规则</button>
+                                    <button type="button" class="btn" style="flex: 1; background: #6c757d; color: white;" @click="closeRuleModal">取消</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
                 </div>
             `,
             props: ['apiKey', 'refreshTrigger'],
@@ -1098,7 +1209,14 @@
                 return {
                     mappings: [],
                     autoRefresh: false,
-                    refreshInterval: null
+                    refreshInterval: null,
+                    showRuleModalFlag: false,
+                    currentMapping: {},
+                    ruleForm: {
+                        accessRule: 'disabled',
+                        accessIPsText: '',
+                        bandwidthLimit: 0
+                    }
                 };
             },
             computed: {
@@ -1200,6 +1318,13 @@
                     const i = Math.floor(Math.log(bytes) / Math.log(k));
                     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
                 },
+                formatBandwidth(bytes) {
+                    if (!bytes) return '无限制';
+                    const k = 1024;
+                    const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                },
                 formatDuration(timestamp) {
                     if (!timestamp) return '-';
                     const now = Math.floor(Date.now() / 1000);
@@ -1211,6 +1336,95 @@
                     if (duration < 3600) return Math.floor(duration / 60) + ' 分钟';
                     if (duration < 86400) return Math.floor(duration / 3600) + ' 小时';
                     return Math.floor(duration / 86400) + ' 天';
+                },
+                showRuleModal(mapping) {
+                    this.currentMapping = mapping;
+                    this.showRuleModalFlag = true;
+                    
+                    // 设置当前规则
+                    this.ruleForm.accessRule = mapping.access_rule || 'disabled';
+                    
+                    // 设置带宽限制
+                    this.ruleForm.bandwidthLimit = mapping.bandwidth_limit || 0;
+                    
+                    // 解析IP列表
+                    if (mapping.access_ips) {
+                        try {
+                            const ips = JSON.parse(mapping.access_ips);
+                            this.ruleForm.accessIPsText = Array.isArray(ips) ? ips.join('\n') : '';
+                        } catch (e) {
+                            this.ruleForm.accessIPsText = '';
+                        }
+                    } else {
+                        this.ruleForm.accessIPsText = '';
+                    }
+                },
+                closeRuleModal() {
+                    this.showRuleModalFlag = false;
+                    this.currentMapping = {};
+                    this.ruleForm = {
+                        accessRule: 'disabled',
+                        accessIPsText: '',
+                        bandwidthLimit: 0
+                    };
+                },
+                async updateRule() {
+                    try {
+                        const data = {
+                            port: this.currentMapping.source_port,
+                            access_rule: this.ruleForm.accessRule,
+                            bandwidth_limit: this.ruleForm.bandwidthLimit || 0
+                        };
+                        
+                        // 如果不是禁用模式，则处理IP列表
+                        if (this.ruleForm.accessRule !== 'disabled') {
+                            const ips = this.ruleForm.accessIPsText
+                                .split('\n')
+                                .map(ip => ip.trim())
+                                .filter(ip => ip.length > 0);
+                            
+                            data.access_ips = JSON.stringify(ips);
+                        } else {
+                            data.access_ips = null;
+                        }
+
+                        const response = await axios.post('/api/mapping/update', data, {
+                            headers: { 'X-API-Key': this.apiKey }
+                        });
+
+                        if (response.data.success) {
+                            this.$emit('notify', 'success', '规则更新成功');
+                            this.closeRuleModal();
+                            this.loadConnections();
+                        }
+                    } catch (error) {
+                        this.$emit('notify', 'error', error.response?.data?.message || '更新规则失败');
+                    }
+                },
+                getIPCount() {
+                    if (!this.ruleForm.accessIPsText) return 0;
+                    return this.ruleForm.accessIPsText
+                        .split('\n')
+                        .map(ip => ip.trim())
+                        .filter(ip => ip.length > 0).length;
+                },
+                getRuleButtonText(mapping) {
+                    if (!mapping.access_rule || mapping.access_rule === 'disabled') {
+                        return '🛡️ 规则管理';
+                    }
+                    
+                    let ipCount = 0;
+                    if (mapping.access_ips) {
+                        try {
+                            const ips = JSON.parse(mapping.access_ips);
+                            ipCount = Array.isArray(ips) ? ips.length : 0;
+                        } catch (e) {
+                            ipCount = 0;
+                        }
+                    }
+                    
+                    const ruleText = mapping.access_rule === 'whitelist' ? '白名单' : '黑名单';
+                    return `🛡️ ${ruleText} (${ipCount}个IP)`;
                 }
             }
         };
@@ -1262,8 +1476,15 @@
             },
             mounted() {
                 this.checkAuth();
+                this.initPageFromHash();
                 this.loadStats();
                 setInterval(() => this.loadStats(), 5000);
+                
+                // 监听hash变化
+                window.addEventListener('hashchange', this.handleHashChange);
+            },
+            beforeUnmount() {
+                window.removeEventListener('hashchange', this.handleHashChange);
             },
             methods: {
                 checkAuth() {
@@ -1274,6 +1495,27 @@
                 },
                 changePage(page) {
                     this.currentPage = page;
+                    // 更新URL hash
+                    window.location.hash = page;
+                },
+                initPageFromHash() {
+                    // 从URL hash读取当前页面
+                    const hash = window.location.hash.slice(1); // 去掉 # 号
+                    const validPages = this.menuItems.map(item => item.id);
+                    if (hash && validPages.includes(hash)) {
+                        this.currentPage = hash;
+                    } else {
+                        // 默认页面，设置hash
+                        window.location.hash = this.currentPage;
+                    }
+                },
+                handleHashChange() {
+                    // 处理hash变化
+                    const hash = window.location.hash.slice(1);
+                    const validPages = this.menuItems.map(item => item.id);
+                    if (hash && validPages.includes(hash)) {
+                        this.currentPage = hash;
+                    }
                 },
                 async loadStats() {
                     try {

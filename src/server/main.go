@@ -83,10 +83,10 @@ func (s *serverService) Start() error {
 				log.Printf("警告: 端口 %d 需要隧道模式但隧道服务未启用，跳过", mapping.SourcePort)
 				continue
 			}
-			err = s.fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, s.tunnelServer, mapping.BandwidthLimit)
+			err = s.fwdManager.AddTunnel(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, s.tunnelServer, mapping.BandwidthLimit, mapping.AccessRule, mapping.AccessIPs)
 		} else {
 			// 直接模式
-			err = s.fwdManager.Add(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.BandwidthLimit)
+			err = s.fwdManager.Add(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.BandwidthLimit, mapping.AccessRule, mapping.AccessIPs)
 		}
 
 		if err != nil {
