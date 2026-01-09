@@ -1088,6 +1088,9 @@
                                 <button class="btn btn-sm" @click="showRuleModal(mapping)" style="background: #17a2b8; color: white;">
                                     {{ getRuleButtonText(mapping) }}
                                 </button>
+                                <button class="btn btn-sm" @click="reloadMapping(mapping.source_port)" style="background: #ffc107; color: #333;" title="强制重新加载映射配置">
+                                    🔄 重新加载
+                                </button>
                                 <div class="badge" style="background: #667eea; color: white; font-size: 1em;">
                                     {{ mapping.total_connections }} 个连接
                                 </div>
@@ -1425,6 +1428,25 @@
                     
                     const ruleText = mapping.access_rule === 'whitelist' ? '白名单' : '黑名单';
                     return `🛡️ ${ruleText} (${ipCount}个IP)`;
+                },
+                async reloadMapping(port) {
+                    if (!confirm(`确定要重新加载端口 ${port} 的映射吗？这将重启该端口的转发服务。`)) {
+                        return;
+                    }
+                    
+                    try {
+                        const response = await axios.post('/api/mapping/reload', 
+                            { port: port },
+                            { headers: { 'X-API-Key': this.apiKey } }
+                        );
+
+                        if (response.data.success) {
+                            this.$emit('notify', 'success', `端口 ${port} 重新加载成功`);
+                            this.loadConnections();
+                        }
+                    } catch (error) {
+                        this.$emit('notify', 'error', error.response?.data?.message || `端口 ${port} 重新加载失败`);
+                    }
                 }
             }
         };

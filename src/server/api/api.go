@@ -62,6 +62,11 @@ type UpdateAccessRuleRequest struct {
 	AccessIPs      *string `json:"access_ips,omitempty"`      // IP列表，JSON格式
 }
 
+// ReloadMappingRequest 重新加载映射请求
+type ReloadMappingRequest struct {
+	Port int `json:"port"`
+}
+
 // Response 统一响应格式
 type Response struct {
 	Success bool        `json:"success"`
@@ -76,6 +81,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mapping/remove", h.authMiddleware(h.handleRemoveMapping))
 	mux.HandleFunc("/api/mapping/list", h.authMiddleware(h.handleListMappings))
 	mux.HandleFunc("/api/mapping/update", h.authMiddleware(h.handleUpdateMapping))
+	mux.HandleFunc("/api/mapping/reload", h.authMiddleware(h.handleReloadMapping))
 	mux.HandleFunc("/api/stats/traffic", h.authMiddleware(h.handleGetTrafficStats))
 	mux.HandleFunc("/api/stats/history", h.authMiddleware(h.handleGetTrafficHistory))
 	mux.HandleFunc("/api/stats/monitor", h.authMiddleware(h.handleTrafficMonitor))
@@ -568,4 +574,56 @@ func (h *Handler) handleUpdateMapping(w http.ResponseWriter, r *http.Request) {
 		fwd.UpdateAccessControl(req.AccessRule, req.AccessIPs)
 		fwd.UpdateBandwidthLimit(req.BandwidthLimit)
 	}
+}
+
+// handleReloadMapping 处理重新加载映射请求
+func (h *Handler) handleReloadMapping(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "只支持 POST 方法")
+		return
+	}
+
+	var req ReloadMappingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+
+	// 重新加载映射配置
+	mapping, err := h.db.GetMapping(req.Port)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "获取映射失败: "+err.Error())
+		return
+	}
+	if mapping == nil {
+		h.writeError(w, http.StatusNotFound, "端口映射不存在")
+		return
+	}
+
+	// 停止现有转发器
+	h.forwarderMgr.Remove(req.Port)
+
+	// 启动新的转发器
+	var errStart error
+	if mapping.UseTunnel {
+		// 隧道模式：使用隧道转发
+		errStart = h.forwarderMgr.AddTunnel(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, h.tunnelServer, mapping.BandwidthLimit, mapping.AccessRule, mapping.AccessIPs)
+	} else {
+		// 直接模式：直接TCP转发
+		errStart = h.forwarderMgr.Add(mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.BandwidthLimit, mapping.AccessRule, mapping.AccessIPs)
+	}
+
+	if errStart != nil {
+		h.writeError(w, http.StatusInternalServerError, "重新启动转发失败: "+errStart.Error())
+		return
+	}
+
+	log.Printf("重新加载端口映射: %d -> %s:%d (tunnel: %v)", mapping.SourcePort, mapping.TargetHost, mapping.TargetPort, mapping.UseTunnel)
+
+	h.writeSuccess(w, "端口映射重新加载成功", map[string]interface{}{
+		"source_port": mapping.SourcePort,
+		"target_host": mapping.TargetHost,
+		"target_port": mapping.TargetPort,
+		"use_tunnel":  mapping.UseTunnel,
+	})
 }
