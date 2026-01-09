@@ -165,7 +165,7 @@ func (f *Forwarder) checkIPAllowed(remoteAddr string) bool {
 func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int64, accessRule *string, accessIPs *string) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
-	if limit != nil {
+	if limit != nil && *limit != 0 {
 		// burst设置为1秒的流量，这样可以平滑处理突发
 		// 同时不会一次性消耗太多令牌
 		burst := int(*limit) / 100
@@ -203,7 +203,7 @@ func NewForwarder(sourcePort int, targetHost string, targetPort int, limit *int6
 func NewTunnelForwarder(sourcePort int, targetHost string, targetPort int, tunnelServer TunnelServer, limit *int64, accessRule *string, accessIPs *string) *Forwarder {
 	ctx, cancel := context.WithCancel(context.Background())
 	var limiterOut, limiterIn *rate.Limiter
-	if limit != nil {
+	if limit != nil && *limit != 0 {
 		// burst设置为1秒的流量，这样可以平滑处理突发
 		// 同时不会一次性消耗太多令牌
 		burst := int(*limit) / 100
