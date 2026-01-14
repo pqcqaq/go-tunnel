@@ -152,9 +152,10 @@ func (f *Forwarder) checkIPAllowed(remoteAddr string) bool {
 	}
 
 	// 根据规则类型返回结果
-	if f.accessRule == "whitelist" {
+	switch f.accessRule {
+	case "whitelist":
 		return inList // 白名单：只允许列表中的IP
-	} else if f.accessRule == "blacklist" {
+	case "blacklist":
 		return !inList // 黑名单：拒绝列表中的IP
 	}
 
